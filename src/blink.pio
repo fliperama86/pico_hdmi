@@ -1,0 +1,43 @@
+;
+; Copyright (c) 2020 Raspberry Pi (Trading) Ltd.
+; SPDX-License-Identifier: BSD-3-Clause
+;
+
+; Example PIO program for RP2350 - Blink an LED
+; This demonstrates the basics of PIO programming
+
+.program blink
+
+; Repeatedly get one word of data from the TX FIFO, stalling when
+; the FIFO is empty. Write the LSB to the OUT pin group.
+
+    pull block    ; Pull data from FIFO, blocking if empty
+    out x, 32     ; Move 32 bits to scratch register X
+loop:
+    jmp x-- loop  ; Decrement X and loop until zero
+    set pins, 1   ; Turn LED on
+    pull block    ; Pull next value
+    out x, 32     ; Load into X
+loop2:
+    jmp x-- loop2 ; Count down
+    set pins, 0   ; Turn LED off
+
+% c-sdk {
+
+static inline void blink_program_init(PIO pio, uint sm, uint offset, uint pin) {
+    pio_sm_config c = blink_program_get_default_config(offset);
+
+    // Map the state machine's SET pin group to one pin
+    sm_config_set_set_pins(&c, pin, 1);
+
+    // Set this pin's GPIO function (connect PIO to the pad)
+    pio_gpio_init(pio, pin);
+
+    // Set the pin direction to output at the PIO
+    pio_sm_set_consecutive_pindirs(pio, sm, pin, 1, true);
+
+    // Load our configuration, and jump to the start of the program
+    pio_sm_init(pio, sm, offset, &c);
+}
+
+%}
