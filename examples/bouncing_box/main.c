@@ -10,6 +10,9 @@
  * Target: RP2350 (Raspberry Pi Pico 2)
  */
 
+// HDMI control pins
+#define PIN_CEC 8 // CEC (HDMI pin 13) - optional
+
 #include "pico_hdmi/hstx_data_island_queue.h"
 #include "pico_hdmi/hstx_packet.h"
 #include "pico_hdmi/video_output.h"

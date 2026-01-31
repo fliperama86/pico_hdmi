@@ -20,11 +20,25 @@ Investigation of sync failures with Acer XB271HU and Samsung Q80 TV.
 | Minimal AVI InfoFrame | Medium | Open - may affect Samsung |
 | No General Control Packet (GCP) | Medium | Open - may affect Samsung |
 
-## Next Steps
+## Samsung Q80 Investigation
 
-1. Test Samsung Q80 in DVI mode to isolate issue
-   - If DVI works: Problem is in Data Islands (InfoFrames, GCP, audio)
-   - If DVI fails: Problem is in video timing
+**Tested:**
+- DVI mode: No signal
+- HDMI mode: No signal
+- Longer startup delays: No signal
+- Different HDMI ports/cables: No signal
+
+**Observations:**
+- TV shows source as "powered off"
+- Brief blink when cable connected, then nothing
+- TV works fine with MiSTer FPGA (uses TX IC with DDC/EDID)
+
+**Likely cause:** Missing DDC/EDID communication. The TV may require EDID negotiation before accepting video. MiSTer's TX IC handles this automatically.
+
+**Potential fixes (not yet tested):**
+- Wire DDC lines (HDMI pins 15, 16) to GPIO for I2C EDID read
+- Add pull-ups on DDC lines to prevent floating I2C bus
+- Implement proper HPD monitoring
 
 ---
 
