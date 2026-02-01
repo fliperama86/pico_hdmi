@@ -28,21 +28,20 @@ Investigation of sync failures with Acer XB271HU and Samsung Q80 TV.
 
 **Root Cause:** Floating DDC bus lines. The TV requires the DDC (I2C) bus to be properly terminated.
 
-**Solution:** Initialize I2C on DDC pins with pull-ups - no EDID read needed!
+**Solution:** DDC bus needs to be terminated - not left floating.
 
+**Hardware fix (no code needed):**
+- Add 4.7k pull-up resistors from DDC_SCL (HDMI pin 15) and DDC_SDA (HDMI pin 16) to 3.3V or 5V
+
+**Alternative - software fix:**
 ```c
-// Just initialize DDC bus with pull-ups
+// Initialize I2C with internal pull-ups
 i2c_init(i2c1, 100000);
-gpio_set_function(PIN_DDC_SDA, GPIO_FUNC_I2C);
-gpio_set_function(PIN_DDC_SCL, GPIO_FUNC_I2C);
-gpio_pull_up(PIN_DDC_SDA);
-gpio_pull_up(PIN_DDC_SCL);
+gpio_set_function(9, GPIO_FUNC_I2C);   // SDA
+gpio_set_function(10, GPIO_FUNC_I2C);  // SCL
+gpio_pull_up(9);
+gpio_pull_up(10);
 ```
-
-**Wiring:**
-- HDMI Pin 15 (DDC_SCL) → GP10
-- HDMI Pin 16 (DDC_SDA) → GP9
-- Internal 3.3V pull-ups sufficient
 
 **Result:** Samsung Q80 TV now syncs correctly with video and audio!
 

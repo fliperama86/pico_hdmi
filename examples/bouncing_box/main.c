@@ -10,11 +10,6 @@
  * Target: RP2350 (Raspberry Pi Pico 2)
  */
 
-// HDMI control pins
-#define PIN_CEC 8      // CEC (HDMI pin 13) - optional
-#define PIN_DDC_SDA 9  // DDC SDA (HDMI pin 16)
-#define PIN_DDC_SCL 10 // DDC SCL (HDMI pin 15)
-
 #include "pico_hdmi/hstx_data_island_queue.h"
 #include "pico_hdmi/hstx_packet.h"
 #include "pico_hdmi/video_output.h"
@@ -23,15 +18,9 @@
 #include "pico/stdlib.h"
 
 #include "hardware/clocks.h"
-#include "hardware/i2c.h"
 
 #include <math.h>
-#include <stdio.h>
 #include <string.h>
-
-// EDID I2C address (0x50 for DDC)
-#define EDID_I2C_ADDR 0x50
-#define DDC_I2C i2c1
 
 #include "audio.h"
 // ============================================================================
@@ -55,21 +44,6 @@
 
 static volatile int box_x = 50, box_y = 50;
 static int box_dx = 2, box_dy = 1;
-
-// ============================================================================
-// DDC Bus Init (just terminate the bus, no EDID read)
-// ============================================================================
-
-static void init_ddc_bus(void)
-{
-    // Initialize I2C for DDC - just to have the bus properly terminated
-    i2c_init(DDC_I2C, 100000);
-    gpio_set_function(PIN_DDC_SDA, GPIO_FUNC_I2C);
-    gpio_set_function(PIN_DDC_SCL, GPIO_FUNC_I2C);
-    gpio_pull_up(PIN_DDC_SDA);
-    gpio_pull_up(PIN_DDC_SCL);
-    printf("DDC bus initialized\n");
-}
 
 // ============================================================================
 // Audio State - Für Elise
@@ -219,9 +193,6 @@ int main(void)
     gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);
 
     sleep_ms(1000);
-
-    // Initialize DDC bus (just terminate it, no EDID read)
-    init_ddc_bus();
 
     // Initialize audio
     init_sine_table();
