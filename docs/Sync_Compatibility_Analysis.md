@@ -2,43 +2,49 @@
 
 Investigation of sync failures with Acer XB271HU and Samsung Q80 TV.
 
-## Status: PARTIAL
+## Status: RESOLVED ✓
 
-**Video Guard Band Fix** (Commit `83d9692`): Added Video Preamble and Video Guard Band before active video.
+| Display | Status | Fix Required |
+|---------|--------|--------------|
+| Morph4K | ✓ Working | Video Guard Band |
+| Acer XB271HU | ✓ Working | Video Guard Band |
+| Samsung Q80 TV | ✓ Working | Video Guard Band + DDC bus init |
 
-| Display | Status | Notes |
-|---------|--------|-------|
-| Morph4K | ✓ Working | No errors, audio/video good |
-| Acer XB271HU | ✓ Working | Audio/video good |
-| Samsung Q80 TV | ✗ Not syncing | Still investigating |
+## Fixes Applied
 
-## Remaining Issues
+| Issue | Commit | Notes |
+|-------|--------|-------|
+| Video Preamble/Guard Band | `83d9692` | Required by HDMI 1.3a spec |
+| DDC Bus Termination | TBD | Samsung Q80 needed DDC pull-ups |
+
+## Remaining Improvements (Optional)
 
 | Issue | Priority | Status |
 |-------|----------|--------|
-| Missing Video Preamble/Guard Band | Critical | ✓ Fixed |
-| Minimal AVI InfoFrame | Medium | Open - may affect Samsung |
-| No General Control Packet (GCP) | Medium | Open - may affect Samsung |
+| Minimal AVI InfoFrame | Low | Open |
+| No General Control Packet (GCP) | Low | Open |
 
-## Samsung Q80 Investigation
+## Samsung Q80 Investigation - RESOLVED ✓
 
-**Tested:**
-- DVI mode: No signal
-- HDMI mode: No signal
-- Longer startup delays: No signal
-- Different HDMI ports/cables: No signal
+**Root Cause:** Floating DDC bus lines. The TV requires the DDC (I2C) bus to be properly terminated.
 
-**Observations:**
-- TV shows source as "powered off"
-- Brief blink when cable connected, then nothing
-- TV works fine with MiSTer FPGA (uses TX IC with DDC/EDID)
+**Solution:** Initialize I2C on DDC pins with pull-ups - no EDID read needed!
 
-**Likely cause:** Missing DDC/EDID communication. The TV may require EDID negotiation before accepting video. MiSTer's TX IC handles this automatically.
+```c
+// Just initialize DDC bus with pull-ups
+i2c_init(i2c1, 100000);
+gpio_set_function(PIN_DDC_SDA, GPIO_FUNC_I2C);
+gpio_set_function(PIN_DDC_SCL, GPIO_FUNC_I2C);
+gpio_pull_up(PIN_DDC_SDA);
+gpio_pull_up(PIN_DDC_SCL);
+```
 
-**Potential fixes (not yet tested):**
-- Wire DDC lines (HDMI pins 15, 16) to GPIO for I2C EDID read
-- Add pull-ups on DDC lines to prevent floating I2C bus
-- Implement proper HPD monitoring
+**Wiring:**
+- HDMI Pin 15 (DDC_SCL) → GP10
+- HDMI Pin 16 (DDC_SDA) → GP9
+- Internal 3.3V pull-ups sufficient
+
+**Result:** Samsung Q80 TV now syncs correctly with video and audio!
 
 ---
 

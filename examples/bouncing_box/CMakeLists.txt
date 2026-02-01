@@ -26,6 +26,7 @@ target_link_libraries(bouncing_box
     hardware_clocks
     hardware_dma
     hardware_irq
+    hardware_i2c
     pico_hdmi
 )
 
