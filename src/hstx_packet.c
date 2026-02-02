@@ -176,7 +176,7 @@ void hstx_packet_set_audio_infoframe(hstx_packet_t *packet, uint32_t sample_rate
     compute_all_parity(packet);
 }
 
-void hstx_packet_set_avi_infoframe(hstx_packet_t *packet, uint8_t vic)
+void hstx_packet_set_avi_infoframe(hstx_packet_t *packet, uint8_t vic, uint8_t pixel_repetition)
 {
     hstx_packet_init(packet);
     packet->header[0] = 0x82;
@@ -187,7 +187,7 @@ void hstx_packet_set_avi_infoframe(hstx_packet_t *packet, uint8_t vic)
     packet->subpacket[0][2] = 0x08;
     packet->subpacket[0][3] = 0x00;
     packet->subpacket[0][4] = vic;
-    packet->subpacket[0][5] = 0x00;
+    packet->subpacket[0][5] = pixel_repetition & 0x0F;
 
     compute_infoframe_checksum(packet);
     compute_all_parity(packet);

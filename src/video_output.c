@@ -6,14 +6,17 @@
 
 #include "pico/stdlib.h"
 
+#include "hardware/clocks.h"
 #include "hardware/dma.h"
 #include "hardware/gpio.h"
 #include "hardware/irq.h"
 #include "hardware/structs/bus_ctrl.h"
+#include "hardware/structs/clocks.h"
 #include "hardware/structs/hstx_ctrl.h"
 #include "hardware/structs/hstx_fifo.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 // ============================================================================
@@ -385,11 +388,25 @@ void video_output_init(uint16_t width, uint16_t height)
     frame_width = width;
     frame_height = height;
 
+    // Configure clk_hstx for the current video mode using SDK functions
+    // After set_sys_clock_khz(), clk_hstx needs to be reconfigured
+    uint32_t sys_freq = clock_get_hz(clk_sys);
+    uint32_t target_hstx_freq = sys_freq / MODE_HSTX_CLK_DIV;
+
+    printf("Configuring clk_hstx: src=%lu Hz, target=%lu Hz, div=%d\n", sys_freq, target_hstx_freq, MODE_HSTX_CLK_DIV);
+
+    // Use SDK function to properly configure clk_hstx with divider
+    clock_configure_int_divider(clk_hstx,
+                                0, // No glitchless mux
+                                CLOCKS_CLK_HSTX_CTRL_AUXSRC_VALUE_CLK_SYS, sys_freq, MODE_HSTX_CLK_DIV);
+
+    printf("clk_hstx configured: %lu Hz\n", clock_get_hz(clk_hstx));
+
     // Claim DMA channels for HSTX (channels 0 and 1)
     dma_channel_claim(DMACH_PING);
     dma_channel_claim(DMACH_PONG);
 
-    // Initialize HDMI Data Island packets (needed if user switches to HDMI mode)
+    // Initialize HDMI Data Island packets
     hstx_packet_t packet;
     hstx_data_island_t island;
 
@@ -405,7 +422,12 @@ void video_output_init(uint16_t width, uint16_t height)
     hstx_encode_data_island(&island, &packet, false, true);
     vblank_infoframe_vsync_off_len = build_line_with_di(vblank_infoframe_vsync_off, island.words, false, false);
 
-    hstx_packet_set_avi_infoframe(&packet, 1);
+#ifdef VIDEO_MODE_320x240
+    // PR=3 (4x repetition) for 1280x240 representing 320x240
+    hstx_packet_set_avi_infoframe(&packet, 1, 3);
+#else
+    hstx_packet_set_avi_infoframe(&packet, 1, 0);
+#endif
     hstx_encode_data_island(&island, &packet, false, true);
     vblank_avi_infoframe_len = build_line_with_di(vblank_avi_infoframe, island.words, false, false);
 
@@ -453,7 +475,7 @@ void video_output_core1_run(void)
         1 << HSTX_CTRL_EXPAND_SHIFT_RAW_N_SHIFTS_LSB | 0 << HSTX_CTRL_EXPAND_SHIFT_RAW_SHIFT_LSB;
 
     hstx_ctrl_hw->csr = 0;
-    hstx_ctrl_hw->csr = HSTX_CTRL_CSR_EXPAND_EN_BITS | 5U << HSTX_CTRL_CSR_CLKDIV_LSB |
+    hstx_ctrl_hw->csr = HSTX_CTRL_CSR_EXPAND_EN_BITS | (uint32_t)MODE_HSTX_CSR_CLKDIV << HSTX_CTRL_CSR_CLKDIV_LSB |
                         5U << HSTX_CTRL_CSR_N_SHIFTS_LSB | 2U << HSTX_CTRL_CSR_SHIFT_LSB | HSTX_CTRL_CSR_EN_BITS;
 
     hstx_ctrl_hw->bit[0] = HSTX_CTRL_BIT0_CLK_BITS | HSTX_CTRL_BIT0_INV_BITS;

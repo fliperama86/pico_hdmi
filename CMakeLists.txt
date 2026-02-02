@@ -10,6 +10,7 @@ target_include_directories(pico_hdmi PUBLIC
 
 target_link_libraries(pico_hdmi
     pico_stdlib
+    hardware_clocks
     hardware_dma
     hardware_irq
     hardware_gpio
