@@ -16,7 +16,6 @@
 #include "hardware/structs/hstx_fifo.h"
 
 #include <math.h>
-#include <stdio.h>
 #include <string.h>
 
 // ============================================================================
@@ -388,19 +387,13 @@ void video_output_init(uint16_t width, uint16_t height)
     frame_width = width;
     frame_height = height;
 
-    // Configure clk_hstx for the current video mode using SDK functions
+    // Configure clk_hstx for the current video mode
     // After set_sys_clock_khz(), clk_hstx needs to be reconfigured
     uint32_t sys_freq = clock_get_hz(clk_sys);
-    uint32_t target_hstx_freq = sys_freq / MODE_HSTX_CLK_DIV;
 
-    printf("Configuring clk_hstx: src=%lu Hz, target=%lu Hz, div=%d\n", sys_freq, target_hstx_freq, MODE_HSTX_CLK_DIV);
-
-    // Use SDK function to properly configure clk_hstx with divider
     clock_configure_int_divider(clk_hstx,
                                 0, // No glitchless mux
                                 CLOCKS_CLK_HSTX_CTRL_AUXSRC_VALUE_CLK_SYS, sys_freq, MODE_HSTX_CLK_DIV);
-
-    printf("clk_hstx configured: %lu Hz\n", clock_get_hz(clk_hstx));
 
     // Claim DMA channels for HSTX (channels 0 and 1)
     dma_channel_claim(DMACH_PING);

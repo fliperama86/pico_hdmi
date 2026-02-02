@@ -14,6 +14,7 @@ PicoHDMI leverages the RP2350's dedicated **HSTX (High-Speed Transmit)** periphe
 - **Audio Data Islands**: Built-in support for TERC4 encoding and scheduled injection of audio samples.
 - **Data Island Queue**: Lock-free queue for asynchronous packet posting from other cores.
 - **Double-Buffered DMA**: Stable video output with minimal jitter.
+- **True 240p DirectVideo Mode**: 320x240 output with HDMI pixel repetition for retro gaming scalers (Morph4K, RetroTINK 4K, OSSC).
 
 ## Scanline Callback Timing
 

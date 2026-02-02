@@ -2,12 +2,14 @@
  * pico_hdmi True 240p DirectVideo Example
  *
  * Demonstrates true 240p output for retro gaming scalers:
- * - Native 320x240@60Hz timing with ~6.3 MHz pixel clock
+ * - 1280x240 @ 60Hz with 4x pixel repetition (representing 320x240)
+ * - Standard 25.2 MHz pixel clock (HDMI-compliant)
+ * - AVI InfoFrame PR=3 tells scalers to treat as 320x240 @ 15kHz
  * - Compatible with Morph4K, RetroTINK 4K, and other scalers
- * - Scalers detect this as true 240p for optimal processing
  *
- * This uses a lower pixel clock than standard 640x480, achieved by
- * dividing the HSTX clock by 4 (126 MHz / 4 = 31.5 MHz HSTX clock).
+ * The trick: We send 1280 pixels at 25.2 MHz (standard VGA rate) but
+ * set the HDMI Pixel Repetition field to 4x, so the scaler knows each
+ * group of 4 pixels is actually 1 logical pixel.
  *
  * Target: RP2350 (Raspberry Pi Pico 2)
  */
@@ -18,9 +20,6 @@
 #include "pico/stdlib.h"
 
 #include "hardware/clocks.h"
-
-#include <stdio.h>
-#include <string.h>
 
 // ============================================================================
 // Configuration
@@ -73,48 +72,24 @@ void __scratch_x("") scanline_callback(uint32_t v_scanline, uint32_t active_line
 
 int main(void)
 {
-    // Set system clock to 126 MHz
+    // Set system clock to 126 MHz (gives 25.2 MHz pixel clock)
     set_sys_clock_khz(126000, true);
 
-    stdio_init_all();
-
-    // Initialize LED for heartbeat - blink immediately to show we're alive
+    // Initialize LED for heartbeat
     gpio_init(PICO_DEFAULT_LED_PIN);
     gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);
-    gpio_put(PICO_DEFAULT_LED_PIN, 1); // LED ON immediately
 
-    sleep_ms(500);
-    gpio_put(PICO_DEFAULT_LED_PIN, 0); // LED OFF
-    sleep_ms(500);
-    gpio_put(PICO_DEFAULT_LED_PIN, 1); // LED ON
-
-    printf("=== BOOT ===\n");
-    sleep_ms(100);
-    printf("True 240p DirectVideo Example\n");
-    printf("Resolution: %dx%d @ 60Hz\n", FRAME_WIDTH, FRAME_HEIGHT);
-    printf("System clock: %lu Hz\n", clock_get_hz(clk_sys));
-    printf("HSTX clock (before init): %lu Hz\n", clock_get_hz(clk_hstx));
-
-    printf("Calling video_output_init...\n");
-    // Initialize video output (configures clk_hstx divider)
+    // Initialize video output
     video_output_init(FRAME_WIDTH, FRAME_HEIGHT);
-    printf("video_output_init done\n");
 
-    printf("HSTX clock (after init): %lu Hz\n", clock_get_hz(clk_hstx));
-
-    // Use HDMI mode (DVI=false) to include Guard Bands and InfoFrames
-    // This improves compatibility with Morph4K and other scalers
+    // Use HDMI mode to send AVI InfoFrame with pixel repetition
     video_output_set_dvi_mode(false);
-    printf("HDMI mode set (DVI disabled)\n");
 
     // Register scanline callback
     video_output_set_scanline_callback(scanline_callback);
-    printf("Callback set, launching Core 1...\n");
 
     // Launch Core 1 for HSTX output
     multicore_launch_core1(video_output_core1_run);
-    printf("Core 1 launched\n");
-    sleep_ms(100);
 
     // Main loop
     uint32_t last_frame = 0;

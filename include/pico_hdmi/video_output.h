@@ -71,13 +71,15 @@ typedef void (*video_output_vsync_cb_t)(void);
 
 /**
  * Scanline Callback:
- * Called by the DVI library when it needs pixel data for a scanline.
+ * Called by the video output system when it needs pixel data for a scanline.
  *
  * @param v_scanline The current vertical scanline (0 to MODE_V_TOTAL_LINES - 1)
  * @param active_line The current active video line (0 to MODE_V_ACTIVE_LINES - 1),
  *                    only valid if active_video is true.
- * @param line_buffer Buffer to fill with 640 RGB565 pixels (packed as uint32_t pairs).
+ * @param line_buffer Buffer to fill with MODE_H_ACTIVE_PIXELS RGB565 pixels (packed as uint32_t pairs).
  *                    The buffer MUST be filled with (MODE_H_ACTIVE_PIXELS / 2) uint32_t words.
+ *                    - 640x480 mode: 640 pixels = 320 uint32_t words
+ *                    - 320x240 mode: 1280 pixels = 640 uint32_t words (4x pixel repetition)
  */
 typedef void (*video_output_scanline_cb_t)(uint32_t v_scanline, uint32_t active_line, uint32_t *line_buffer);
 
