@@ -1,6 +1,6 @@
-# PicoHDMI
-[![Discord](https://img.shields.io)](https://discord.gg/fR4sXHf5)
+![Discord](https://img.shields.io/discord/1469402044845527253)
 
+# PicoHDMI
 An HSTX-native HDMI output library for the RP2350 (Raspberry Pi Pico 2).
 
 PicoHDMI leverages the RP2350's dedicated **HSTX (High-Speed Transmit)** peripheral with hardware TMDS encoding. No bit-banging, no overclocking required: just near-zero CPU overhead for video output.
