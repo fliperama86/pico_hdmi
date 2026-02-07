@@ -20,7 +20,7 @@ PicoHDMI leverages the RP2350's dedicated **HSTX (High-Speed Transmit)** periphe
 
 ## Audio Sample Rate
 
-By default, HDMI audio is configured for 48kHz. To use a different sample rate (e.g., 44100 Hz for NES emulation), call `pico_hdmi_set_audio_sample_rate()` after `video_output_init()`:
+By default, HDMI audio is configured for 48kHz. To use a different sample rate (44100 Hz for example), call `pico_hdmi_set_audio_sample_rate()` after `video_output_init()`:
 
 ```c
 video_output_init(FRAME_WIDTH, FRAME_HEIGHT);
