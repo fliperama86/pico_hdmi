@@ -382,6 +382,68 @@ void __scratch_x("") dma_irq_handler()
 // Public Interface
 // ============================================================================
 
+// ACR N/CTS lookup for 25.2 MHz pixel clock (HDMI spec Table 7-1/7-2)
+static void get_acr_params(uint32_t sample_rate, uint32_t *n, uint32_t *cts)
+{
+    switch (sample_rate) {
+        case 32000:
+            *n = 4096;
+            *cts = 25200;
+            break;
+        case 44100:
+            *n = 6272;
+            *cts = 28000;
+            break;
+        case 48000:
+            *n = 6144;
+            *cts = 25200;
+            break;
+        case 88200:
+            *n = 12544;
+            *cts = 28000;
+            break;
+        case 96000:
+            *n = 12288;
+            *cts = 25200;
+            break;
+        case 176400:
+            *n = 25088;
+            *cts = 28000;
+            break;
+        case 192000:
+            *n = 24576;
+            *cts = 25200;
+            break;
+        default:
+            *n = 6144;
+            *cts = 25200;
+            break; // fallback to 48kHz
+    }
+}
+
+static void configure_audio_packets(uint32_t sample_rate)
+{
+    hstx_di_queue_set_sample_rate(sample_rate);
+
+    hstx_packet_t packet;
+    hstx_data_island_t island;
+
+    uint32_t acr_n;
+    uint32_t acr_cts;
+    get_acr_params(sample_rate, &acr_n, &acr_cts);
+    hstx_packet_set_acr(&packet, acr_n, acr_cts);
+    hstx_encode_data_island(&island, &packet, true, true);
+    vblank_acr_vsync_on_len = build_line_with_di(vblank_acr_vsync_on, island.words, true, false);
+    hstx_encode_data_island(&island, &packet, false, true);
+    vblank_acr_vsync_off_len = build_line_with_di(vblank_acr_vsync_off, island.words, false, false);
+
+    hstx_packet_set_audio_infoframe(&packet, sample_rate, 2, 16);
+    hstx_encode_data_island(&island, &packet, true, true);
+    vblank_infoframe_vsync_on_len = build_line_with_di(vblank_infoframe_vsync_on, island.words, true, false);
+    hstx_encode_data_island(&island, &packet, false, true);
+    vblank_infoframe_vsync_off_len = build_line_with_di(vblank_infoframe_vsync_off, island.words, false, false);
+}
+
 void video_output_init(uint16_t width, uint16_t height)
 {
     frame_width = width;
@@ -399,21 +461,11 @@ void video_output_init(uint16_t width, uint16_t height)
     dma_channel_claim(DMACH_PING);
     dma_channel_claim(DMACH_PONG);
 
-    // Initialize HDMI Data Island packets
+    // Initialize HDMI audio packets (default 48kHz)
+    configure_audio_packets(48000);
+
     hstx_packet_t packet;
     hstx_data_island_t island;
-
-    hstx_packet_set_acr(&packet, 6144, 25200);
-    hstx_encode_data_island(&island, &packet, true, true);
-    vblank_acr_vsync_on_len = build_line_with_di(vblank_acr_vsync_on, island.words, true, false);
-    hstx_encode_data_island(&island, &packet, false, true);
-    vblank_acr_vsync_off_len = build_line_with_di(vblank_acr_vsync_off, island.words, false, false);
-
-    hstx_packet_set_audio_infoframe(&packet, 48000, 2, 16);
-    hstx_encode_data_island(&island, &packet, true, true);
-    vblank_infoframe_vsync_on_len = build_line_with_di(vblank_infoframe_vsync_on, island.words, true, false);
-    hstx_encode_data_island(&island, &packet, false, true);
-    vblank_infoframe_vsync_off_len = build_line_with_di(vblank_infoframe_vsync_off, island.words, false, false);
 
 #ifdef VIDEO_MODE_320x240
     // PR=3 (4x repetition) for 1280x240 representing 320x240
@@ -513,4 +565,9 @@ void video_output_core1_run(void)
         }
         tight_loop_contents();
     }
+}
+
+void pico_hdmi_set_audio_sample_rate(uint32_t sample_rate)
+{
+    configure_audio_packets(sample_rate);
 }

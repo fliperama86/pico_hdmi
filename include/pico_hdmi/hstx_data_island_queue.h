@@ -12,6 +12,12 @@
 void hstx_di_queue_init(void);
 
 /**
+ * Set the audio sample rate for packet timing.
+ * @param sample_rate Audio sample rate in Hz (e.g. 44100, 48000)
+ */
+void hstx_di_queue_set_sample_rate(uint32_t sample_rate);
+
+/**
  * Push a pre-encoded Data Island into the queue.
  * Returns true if successful, false if the queue is full.
  */

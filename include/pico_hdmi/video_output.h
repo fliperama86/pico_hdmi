@@ -127,4 +127,12 @@ void video_output_set_dvi_mode(bool enabled);
  */
 void video_output_core1_run(void);
 
+/**
+ * Reconfigure HDMI audio for a different sample rate.
+ * Updates ACR, Audio InfoFrame, and packet timing.
+ * Can be called after video_output_init() to override the default 48kHz.
+ * @param sample_rate Audio sample rate in Hz (e.g. 32000, 44100, 48000)
+ */
+void pico_hdmi_set_audio_sample_rate(uint32_t sample_rate);
+
 #endif // VIDEO_OUTPUT_H
