@@ -467,12 +467,9 @@ void video_output_init(uint16_t width, uint16_t height)
     hstx_packet_t packet;
     hstx_data_island_t island;
 
-#ifdef VIDEO_MODE_320x240
-    // PR=3 (4x repetition) for 1280x240 representing 320x240
-    hstx_packet_set_avi_infoframe(&packet, 1, 3);
-#else
-    hstx_packet_set_avi_infoframe(&packet, 1, 0);
-#endif
+    // VIC=1 for standard 640x480, VIC=0 for non-standard timings (e.g. 240p)
+    uint8_t vic = (height == 480) ? 1 : 0;
+    hstx_packet_set_avi_infoframe(&packet, vic, 0);
     hstx_encode_data_island(&island, &packet, false, true);
     vblank_avi_infoframe_len = build_line_with_di(vblank_avi_infoframe, island.words, false, false);
 
