@@ -13,11 +13,10 @@ set(CMAKE_CXX_STANDARD 17)
 
 pico_sdk_init()
 
-# True 240p mode for retro scalers (Morph4K, RetroTINK)
-# Uses native 320x240@60Hz timing with low pixel clock (~6.3 MHz)
-add_compile_definitions(VIDEO_MODE_320x240=1)
+# Use runtime video mode switching API
+set(PICO_HDMI_RUNTIME_MODES ON CACHE BOOL "" FORCE)
 
-# Add pico_hdmi library (MUST be after add_compile_definitions)
+# Add pico_hdmi library
 add_subdirectory(../.. pico_hdmi)
 
 add_executable(directvideo_240p

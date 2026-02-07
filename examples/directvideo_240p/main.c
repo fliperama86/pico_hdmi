@@ -12,7 +12,7 @@
 
 #include "pico_hdmi/hstx_data_island_queue.h"
 #include "pico_hdmi/hstx_packet.h"
-#include "pico_hdmi/video_output.h"
+#include "pico_hdmi/video_output_rt.h"
 
 #include "pico/multicore.h"
 #include "pico/stdlib.h"
@@ -133,8 +133,9 @@ int main(void)
     init_sine_table();
     phase_increment = (uint32_t)(((uint64_t)TONE_FREQ << 32) / AUDIO_SAMPLE_RATE);
 
-    // Initialize video output
+    // Initialize video output in 240p mode
     hstx_di_queue_init();
+    video_output_set_mode(&VIDEO_MODE_240P);
     video_output_init(FRAME_WIDTH, FRAME_HEIGHT);
 
     // Use HDMI mode for audio + AVI InfoFrame
