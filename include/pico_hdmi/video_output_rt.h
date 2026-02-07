@@ -23,8 +23,8 @@ typedef struct {
     uint8_t hstx_csr_clkdiv;
 } video_mode_t;
 
-extern const video_mode_t VIDEO_MODE_480P;
-extern const video_mode_t VIDEO_MODE_240P;
+extern const video_mode_t video_mode_480_p;
+extern const video_mode_t video_mode_240_p;
 extern const video_mode_t *video_output_active_mode;
 
 // ============================================================================

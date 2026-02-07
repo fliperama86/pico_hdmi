@@ -37,6 +37,11 @@ void hstx_di_queue_set_v_total(uint32_t v_total)
     cached_v_total_lines = v_total;
 }
 
+void hstx_di_queue_set_samples_per_line_fp(uint32_t value)
+{
+    samples_per_line_fp = value;
+}
+
 bool hstx_di_queue_push(const hstx_data_island_t *island)
 {
     uint32_t next_head = (di_ring_head + 1) % DI_RING_BUFFER_SIZE;

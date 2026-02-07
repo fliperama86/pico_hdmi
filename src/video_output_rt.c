@@ -62,7 +62,7 @@
 // Runtime Video Mode Definitions
 // ============================================================================
 
-const video_mode_t VIDEO_MODE_480P = {
+const video_mode_t video_mode_480_p = {
     .h_front_porch = 16,
     .h_sync_width = 96,
     .h_back_porch = 48,
@@ -77,7 +77,7 @@ const video_mode_t VIDEO_MODE_480P = {
     .hstx_csr_clkdiv = 5,
 };
 
-const video_mode_t VIDEO_MODE_240P = {
+const video_mode_t video_mode_240_p = {
     .h_front_porch = 32,
     .h_sync_width = 192,
     .h_back_porch = 96,
@@ -92,7 +92,7 @@ const video_mode_t VIDEO_MODE_240P = {
     .hstx_csr_clkdiv = 5,
 };
 
-const video_mode_t *video_output_active_mode = &VIDEO_MODE_480P;
+const video_mode_t *video_output_active_mode = &video_mode_480_p;
 
 // ============================================================================
 // ISR-Cached Timing Variables (written by apply_mode, read by ISR)
@@ -509,6 +509,16 @@ static void configure_audio_packets(uint32_t sample_rate)
 {
     hstx_di_queue_set_sample_rate(sample_rate);
 
+    // Override samples_per_line with pixel-clock-accurate value.
+    // The default set_sample_rate() assumes exactly 60 Hz, which is wrong
+    // for 240p (60.114 Hz). Derive from actual timing instead:
+    //   samples_per_line = sample_rate * h_total_pixels / pixel_clock
+    uint32_t pixel_clock_hz = clock_get_hz(clk_sys) / ((uint32_t)video_output_active_mode->hstx_clk_div *
+                                                       video_output_active_mode->hstx_csr_clkdiv);
+    uint32_t h_total = video_output_active_mode->h_total_pixels;
+    uint32_t spl_fp = (uint32_t)(((uint64_t)sample_rate * h_total << 16) / pixel_clock_hz);
+    hstx_di_queue_set_samples_per_line_fp(spl_fp);
+
     hstx_packet_t packet;
     hstx_data_island_t island;
 
@@ -608,7 +618,7 @@ void video_output_init(uint16_t width, uint16_t height)
 #ifdef VIDEO_MODE_320x240
         initial_mode = &VIDEO_MODE_240P;
 #else
-        initial_mode = &VIDEO_MODE_480P;
+        initial_mode = &video_mode_480_p;
 #endif
     }
 
@@ -769,7 +779,8 @@ void video_output_update_acr(uint32_t pixel_clock_hz)
 {
     // Calculate CTS for non-standard pixel clock:
     // CTS = pixel_clock_hz * N / (128 * sample_rate)
-    uint32_t acr_n, acr_cts;
+    uint32_t acr_n;
+    uint32_t acr_cts;
     get_acr_params(current_sample_rate, &acr_n, &acr_cts);
 
     // Use 64-bit math to avoid overflow
