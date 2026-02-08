@@ -135,7 +135,7 @@ int main(void)
 
     // Initialize video output in 240p mode
     hstx_di_queue_init();
-    video_output_set_mode(&VIDEO_MODE_240P);
+    video_output_set_mode(&video_mode_240_p);
     video_output_init(FRAME_WIDTH, FRAME_HEIGHT);
 
     // Use HDMI mode for audio + AVI InfoFrame

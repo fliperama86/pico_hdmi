@@ -215,33 +215,45 @@ static void __scratch_x("") hstx_resync(void)
     dma_channel_abort(DMACH_PING);
     dma_channel_abort(DMACH_PONG);
 
-    // 2. Disable HSTX (resets shift register, clock generator, and flushes FIFO)
+    // 2. Disconnect GPIO before disabling HSTX (no garbage on pins)
+    for (int i = PIN_HSTX_CLK; i <= PIN_HSTX_D2 + 1; ++i)
+        gpio_set_function(i, GPIO_FUNC_SIO);
+
+    // 3. Disable HSTX (resets shift register, clock generator, and flushes FIFO)
     hstx_ctrl_hw->csr &= ~HSTX_CTRL_CSR_EN_BITS;
 
     // Small delay to ensure HSTX fully stops
     __asm volatile("nop\nnop\nnop\nnop");
 
-    // 3. Reset state to start of frame
+    // 4. Reset state to start of frame
     v_scanline = 0;
     vactive_cmdlist_posted = false;
     dma_pong = false;
 
-    // 4. Clear any pending DMA interrupts
+    // 5. Clear any pending DMA interrupts
     dma_hw->ints0 = (1U << DMACH_PING) | (1U << DMACH_PONG);
 
-    // 5. Configure DMA PING to start from beginning of frame (Line 0)
+    // 6. Configure DMA PING to start from beginning of frame (Line 0)
     dma_channel_hw_t *ch_ping = &dma_hw->ch[DMACH_PING];
     ch_ping->read_addr = (uintptr_t)vblank_line_vsync_off;
     ch_ping->transfer_count = 9;
 
-    // 6. Configure DMA PONG for the NEXT line (Line 1)
+    // 7. Configure DMA PONG for the NEXT line (Line 1)
     dma_channel_hw_t *ch_pong = &dma_hw->ch[DMACH_PONG];
     ch_pong->read_addr = (uintptr_t)vblank_line_vsync_off;
     ch_pong->transfer_count = 9;
 
-    // 7. Re-enable HSTX then start DMA
+    // 8. Re-enable HSTX and start DMA (output goes nowhere — GPIO disconnected)
     hstx_ctrl_hw->csr |= HSTX_CTRL_CSR_EN_BITS;
     dma_channel_start(DMACH_PING);
+
+    // 9. Wait for first valid line to serialize
+    while (dma_channel_is_busy(DMACH_PING))
+        tight_loop_contents();
+
+    // 10. Reconnect GPIO — TV sees valid TMDS immediately
+    for (int i = PIN_HSTX_CLK; i <= PIN_HSTX_D2 + 1; ++i)
+        gpio_set_function(i, 0);
 }
 
 // ============================================================================
@@ -556,7 +568,8 @@ static void build_all_command_lists(const video_mode_t *mode)
 {
     build_dvi_command_lists();
 
-    // AVI InfoFrame (VIC=1 for 480p, VIC=0 otherwise)
+    // AVI InfoFrame: VIC=0 (non-standard) to avoid strict pixel clock
+    // validation by sinks. Our 25.2 MHz is 0.1% off from standard 25.175 MHz.
     hstx_packet_t packet;
     hstx_data_island_t island;
     uint8_t vic = (mode->v_active_lines == 480) ? 1 : 0;
@@ -699,11 +712,7 @@ void video_output_core1_run(void)
         hstx_ctrl_hw->bit[bit + 1] = lane_data_sel_bits;
     }
 
-    // Set GPIO 12-19 to HSTX function (function 0 on RP2350)
-    for (int i = PIN_HSTX_CLK; i <= PIN_HSTX_D2 + 1; ++i)
-        gpio_set_function(i, 0);
-
-    // DMA Setup
+    // DMA Setup (configured before GPIO connection to avoid TMDS garbage)
     dma_channel_config c = dma_channel_get_default_config(DMACH_PING);
     channel_config_set_chain_to(&c, DMACH_PONG);
     channel_config_set_dreq(&c, DREQ_HSTX);
@@ -722,6 +731,15 @@ void video_output_core1_run(void)
 
     bus_ctrl_hw->priority = BUSCTRL_BUS_PRIORITY_DMA_W_BITS | BUSCTRL_BUS_PRIORITY_DMA_R_BITS;
     dma_channel_start(DMACH_PING);
+
+    // Wait for first DMA transfer to complete — HSTX serializes valid TMDS
+    // internally but GPIO isn't connected yet, so TV sees nothing.
+    while (dma_channel_is_busy(DMACH_PING))
+        tight_loop_contents();
+
+    // NOW connect GPIO — TV's first TMDS exposure is valid data
+    for (int i = PIN_HSTX_CLK; i <= PIN_HSTX_D2 + 1; ++i)
+        gpio_set_function(i, 0);
 
     while (1) {
         // Check for pending mode switch
