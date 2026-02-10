@@ -1,5 +1,6 @@
-# PicoHDMI
+[![Discord](https://img.shields.io/discord/1469402044845527253)](https://discord.gg/fR4sXHf5)
 
+# PicoHDMI
 An HSTX-native HDMI output library for the RP2350 (Raspberry Pi Pico 2).
 
 PicoHDMI leverages the RP2350's dedicated **HSTX (High-Speed Transmit)** peripheral with hardware TMDS encoding. No bit-banging, no overclocking required: just near-zero CPU overhead for video output.
@@ -14,6 +15,19 @@ PicoHDMI leverages the RP2350's dedicated **HSTX (High-Speed Transmit)** periphe
 - **Audio Data Islands**: Built-in support for TERC4 encoding and scheduled injection of audio samples.
 - **Data Island Queue**: Lock-free queue for asynchronous packet posting from other cores.
 - **Double-Buffered DMA**: Stable video output with minimal jitter.
+- **True 240p DirectVideo Mode**: 320x240 output with HDMI pixel repetition for retro gaming scalers (Morph4K, RetroTINK 4K, OSSC).
+- **Configurable Audio Sample Rate**: Default 48kHz, with runtime support for 32kHz, 44.1kHz, and other standard HDMI rates. ACR N/CTS values follow the HDMI spec (Table 7-1/7-2).
+
+## Audio Sample Rate
+
+By default, HDMI audio is configured for 48kHz. To use a different sample rate (44100 Hz for example), call `pico_hdmi_set_audio_sample_rate()` after `video_output_init()`:
+
+```c
+video_output_init(FRAME_WIDTH, FRAME_HEIGHT);
+pico_hdmi_set_audio_sample_rate(44100);
+```
+
+Supported rates: 32000, 44100, 48000, 88200, 96000, 176400, 192000 Hz.
 
 ## Scanline Callback Timing
 

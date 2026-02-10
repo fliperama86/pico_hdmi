@@ -2,29 +2,48 @@
 
 Investigation of sync failures with Acer XB271HU and Samsung Q80 TV.
 
-## Status: PARTIAL
+## Status: RESOLVED ✓
 
-**Video Guard Band Fix** (Commit `83d9692`): Added Video Preamble and Video Guard Band before active video.
+| Display | Status | Fix Required |
+|---------|--------|--------------|
+| Morph4K | ✓ Working | Video Guard Band |
+| Acer XB271HU | ✓ Working | Video Guard Band |
+| Samsung Q80 TV | ✓ Working | Video Guard Band + DDC bus init |
 
-| Display | Status | Notes |
-|---------|--------|-------|
-| Morph4K | ✓ Working | No errors, audio/video good |
-| Acer XB271HU | ✓ Working | Audio/video good |
-| Samsung Q80 TV | ✗ Not syncing | Still investigating |
+## Fixes Applied
 
-## Remaining Issues
+| Issue | Commit | Notes |
+|-------|--------|-------|
+| Video Preamble/Guard Band | `83d9692` | Required by HDMI 1.3a spec |
+| DDC Bus Termination | TBD | Samsung Q80 needed DDC pull-ups |
+
+## Remaining Improvements (Optional)
 
 | Issue | Priority | Status |
 |-------|----------|--------|
-| Missing Video Preamble/Guard Band | Critical | ✓ Fixed |
-| Minimal AVI InfoFrame | Medium | Open - may affect Samsung |
-| No General Control Packet (GCP) | Medium | Open - may affect Samsung |
+| Minimal AVI InfoFrame | Low | Open |
+| No General Control Packet (GCP) | Low | Open |
 
-## Next Steps
+## Samsung Q80 Investigation - RESOLVED ✓
 
-1. Test Samsung Q80 in DVI mode to isolate issue
-   - If DVI works: Problem is in Data Islands (InfoFrames, GCP, audio)
-   - If DVI fails: Problem is in video timing
+**Root Cause:** Floating DDC bus lines. The TV requires the DDC (I2C) bus to be properly terminated.
+
+**Solution:** DDC bus needs to be terminated - not left floating.
+
+**Hardware fix (no code needed):**
+- Add 4.7k pull-up resistors from DDC_SCL (HDMI pin 15) and DDC_SDA (HDMI pin 16) to 3.3V or 5V
+
+**Alternative - software fix:**
+```c
+// Initialize I2C with internal pull-ups
+i2c_init(i2c1, 100000);
+gpio_set_function(9, GPIO_FUNC_I2C);   // SDA
+gpio_set_function(10, GPIO_FUNC_I2C);  // SCL
+gpio_pull_up(9);
+gpio_pull_up(10);
+```
+
+**Result:** Samsung Q80 TV now syncs correctly with video and audio!
 
 ---
 
