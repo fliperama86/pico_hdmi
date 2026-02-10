@@ -9,6 +9,9 @@ static hstx_data_island_t di_ring_buffer[DI_RING_BUFFER_SIZE];
 static volatile uint32_t di_ring_head = 0;
 static volatile uint32_t di_ring_tail = 0;
 
+// Single pre-encoded silent audio packet (fixed B-frame flags).
+static hstx_data_island_t silence_packet;
+
 // Audio timing state (default 48kHz, 525 lines for 480p)
 static uint32_t audio_sample_accum = 0; // Fixed-point accumulator
 static uint32_t cached_v_total_lines = 525;
@@ -24,6 +27,11 @@ void hstx_di_queue_init(void)
     di_ring_head = 0;
     di_ring_tail = 0;
     audio_sample_accum = 0;
+    // Build a single silent audio packet.
+    hstx_packet_t packet;
+    audio_sample_t samples[4] = {0};
+    (void)hstx_packet_set_audio_samples(&packet, samples, 4, 0);
+    hstx_encode_data_island(&silence_packet, &packet, false, true);
 }
 
 void hstx_di_queue_set_sample_rate(uint32_t sample_rate)
@@ -71,17 +79,14 @@ const uint32_t *__scratch_x("") hstx_di_queue_get_audio_packet(void)
 {
     // Check if it's time to send a 4-sample audio packet (every ~2.6 lines)
     if (audio_sample_accum >= (4 << 16)) {
+        audio_sample_accum -= (4 << 16);
         if (di_ring_tail != di_ring_head) {
-            audio_sample_accum -= (4 << 16);
             const uint32_t *words = di_ring_buffer[di_ring_tail].words;
             di_ring_tail = (di_ring_tail + 1) % DI_RING_BUFFER_SIZE;
             return words;
-        } // Queue is empty but we owe samples.
-        // Clamp accumulator to prevent 32-bit overflow during long silence.
-        // Also prevents bursting when data returns.
-        if (audio_sample_accum > MAX_AUDIO_ACCUM) {
-            audio_sample_accum = MAX_AUDIO_ACCUM;
         }
+        // Queue is empty: return a pre-encoded silent packet to keep HDMI audio active.
+        return silence_packet.words;
     }
     return NULL;
 }
