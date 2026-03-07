@@ -106,7 +106,7 @@ static uint16_t rt_v_front_porch;
 static uint16_t rt_v_sync_width;
 static uint16_t rt_v_back_porch;
 static uint16_t rt_v_active_lines;
-static uint16_t rt_v_total_lines;
+uint16_t rt_v_total_lines;
 static uint16_t rt_sync_after_di;
 
 // ============================================================================

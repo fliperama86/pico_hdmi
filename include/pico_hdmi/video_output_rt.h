@@ -34,6 +34,7 @@ extern const video_mode_t *video_output_active_mode;
 extern uint16_t frame_width;
 extern uint16_t frame_height;
 extern volatile uint32_t video_frame_count;
+extern uint16_t rt_v_total_lines;
 
 // ============================================================================
 // Callback Types
