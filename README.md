@@ -1,4 +1,4 @@
-[![Discord](https://img.shields.io/discord/1469402044845527253)](https://discord.gg/fR4sXHf5)
+[![Discord](https://img.shields.io/discord/1469402044845527253)](https://discord.gg/NqK9m8CBPT)
 
 # PicoHDMI
 An HSTX-native HDMI output library for the RP2350 (Raspberry Pi Pico 2).
