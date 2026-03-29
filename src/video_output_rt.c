@@ -444,7 +444,7 @@ static inline void __scratch_x("") video_output_handle_active_data(dma_channel_h
 // DMA IRQ Handler
 // ============================================================================
 
-void __scratch_x("") dma_irq_handler()
+static void __scratch_x("") dma_irq_handler()
 {
     uint32_t ch_num = dma_pong ? DMACH_PONG : DMACH_PING;
     dma_channel_hw_t *ch = &dma_hw->ch[ch_num];
@@ -691,7 +691,7 @@ void video_output_core1_run(void)
     // HSTX Hardware Setup
     hstx_ctrl_hw->expand_tmds = 4 << HSTX_CTRL_EXPAND_TMDS_L2_NBITS_LSB | 8 << HSTX_CTRL_EXPAND_TMDS_L2_ROT_LSB |
                                 5 << HSTX_CTRL_EXPAND_TMDS_L1_NBITS_LSB | 3 << HSTX_CTRL_EXPAND_TMDS_L1_ROT_LSB |
-                                4 << HSTX_CTRL_EXPAND_TMDS_L0_NBITS_LSB | 13 << HSTX_CTRL_EXPAND_TMDS_L0_ROT_LSB;
+                                4 << HSTX_CTRL_EXPAND_TMDS_L0_NBITS_LSB | 29 << HSTX_CTRL_EXPAND_TMDS_L0_ROT_LSB;
 
     hstx_ctrl_hw->expand_shift =
         2 << HSTX_CTRL_EXPAND_SHIFT_ENC_N_SHIFTS_LSB | 16 << HSTX_CTRL_EXPAND_SHIFT_ENC_SHIFT_LSB |
@@ -706,7 +706,7 @@ void video_output_core1_run(void)
     hstx_ctrl_hw->bit[1] = HSTX_CTRL_BIT0_CLK_BITS;
     for (uint lane = 0; lane < 3; ++lane) {
         int bit = 2 + (lane * 2);
-        uint32_t lane_data_sel_bits = (lane * 10) << HSTX_CTRL_BIT0_SEL_P_LSB | (lane * 10 + 1)
+        uint32_t lane_data_sel_bits = (lane * 10) << HSTX_CTRL_BIT0_SEL_P_LSB | ((lane * 10) + 1)
                                                                                     << HSTX_CTRL_BIT0_SEL_N_LSB;
         hstx_ctrl_hw->bit[bit] = lane_data_sel_bits | HSTX_CTRL_BIT0_INV_BITS;
         hstx_ctrl_hw->bit[bit + 1] = lane_data_sel_bits;
