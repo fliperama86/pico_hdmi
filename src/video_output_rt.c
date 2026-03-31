@@ -478,43 +478,36 @@ static void __scratch_x("") dma_irq_handler()
 // Apply Mode
 // ============================================================================
 
-// ACR N/CTS lookup for 25.2 MHz pixel clock (HDMI spec Table 7-1/7-2)
-static void get_acr_params(uint32_t sample_rate, uint32_t *n, uint32_t *cts)
+// ACR N values from HDMI spec Table 7-1; CTS computed from actual pixel clock.
+// Formula: f_audio = f_TMDS * N / (128 * CTS)  =>  CTS = f_TMDS * N / (128 * f_audio)
+static uint32_t get_acr_n(uint32_t sample_rate)
 {
     switch (sample_rate) {
         case 32000:
-            *n = 4096;
-            *cts = 25200;
-            break;
+            return 4096;
         case 44100:
-            *n = 6272;
-            *cts = 28000;
-            break;
+            return 6272;
         case 48000:
-            *n = 6144;
-            *cts = 25200;
-            break;
+            return 6144;
         case 88200:
-            *n = 12544;
-            *cts = 28000;
-            break;
+            return 12544;
         case 96000:
-            *n = 12288;
-            *cts = 25200;
-            break;
+            return 12288;
         case 176400:
-            *n = 25088;
-            *cts = 28000;
-            break;
+            return 25088;
         case 192000:
-            *n = 24576;
-            *cts = 25200;
-            break;
+            return 24576;
         default:
-            *n = 6144;
-            *cts = 25200;
-            break; // fallback to 48kHz
+            return 6144; // fallback to 48kHz
     }
+}
+
+static void get_acr_params(uint32_t sample_rate, uint32_t *n, uint32_t *cts)
+{
+    *n = get_acr_n(sample_rate);
+    uint32_t pixel_clock = clock_get_hz(clk_sys) / ((uint32_t)video_output_active_mode->hstx_clk_div *
+                                                    video_output_active_mode->hstx_csr_clkdiv);
+    *cts = (uint32_t)(((uint64_t)pixel_clock * *n) / (128ULL * sample_rate));
 }
 
 static void configure_audio_packets(uint32_t sample_rate)
@@ -795,15 +788,9 @@ void video_output_reconfigure_clock(void)
 
 void video_output_update_acr(uint32_t pixel_clock_hz)
 {
-    // Calculate CTS for non-standard pixel clock:
     // CTS = pixel_clock_hz * N / (128 * sample_rate)
-    uint32_t acr_n;
-    uint32_t acr_cts;
-    get_acr_params(current_sample_rate, &acr_n, &acr_cts);
-
-    // Use 64-bit math to avoid overflow
-    uint64_t cts64 = ((uint64_t)pixel_clock_hz * acr_n) / (128ULL * current_sample_rate);
-    uint32_t custom_cts = (uint32_t)cts64;
+    uint32_t acr_n = get_acr_n(current_sample_rate);
+    uint32_t custom_cts = (uint32_t)(((uint64_t)pixel_clock_hz * acr_n) / (128ULL * current_sample_rate));
 
     hstx_packet_t packet;
     hstx_data_island_t island;
