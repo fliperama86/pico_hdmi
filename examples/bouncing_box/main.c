@@ -18,6 +18,7 @@
 #include "pico/stdlib.h"
 
 #include "hardware/clocks.h"
+#include "hardware/vreg.h"
 
 #include <math.h>
 #include <string.h>
@@ -27,10 +28,15 @@
 // Configuration
 // ============================================================================
 
+#ifdef VIDEO_MODE_1280x720
+#define FRAME_WIDTH 1280
+#define FRAME_HEIGHT 720
+#define BOX_SIZE 64
+#else
 #define FRAME_WIDTH 640
 #define FRAME_HEIGHT 480
-
 #define BOX_SIZE 32
+#endif
 #define BG_COLOR 0x0010  // Dark blue (RGB565)
 #define BOX_COLOR 0xFFE0 // Yellow (RGB565)
 
@@ -43,7 +49,11 @@
 // ============================================================================
 
 static volatile int box_x = 50, box_y = 50;
+#ifdef VIDEO_MODE_1280x720
+static int box_dx = 4, box_dy = 2;
+#else
 static int box_dx = 2, box_dy = 1;
+#endif
 
 // ============================================================================
 // Audio State - Für Elise
@@ -109,7 +119,7 @@ static void generate_audio(void)
         audio_frame_counter = hstx_packet_set_audio_samples(&packet, samples, 4, audio_frame_counter);
 
         hstx_data_island_t island;
-        hstx_encode_data_island(&island, &packet, false, true);
+        hstx_encode_data_island(&island, &packet, false, DI_HSYNC_ACTIVE);
         hstx_di_queue_push(&island);
     }
 }
@@ -118,7 +128,7 @@ static void generate_audio(void)
 // Scanline Callback (runs on Core 1)
 // ============================================================================
 
-void __scratch_x("") scanline_callback(uint32_t v_scanline, uint32_t active_line, uint32_t *dst)
+static void __scratch_x("") scanline_callback(uint32_t v_scanline, uint32_t active_line, uint32_t *dst)
 {
     (void)v_scanline;
 
@@ -183,8 +193,16 @@ static void update_box(void)
 
 int main(void)
 {
-    // Set system clock to 126 MHz for HSTX timing
+#ifdef VIDEO_MODE_1280x720
+    // 720p60: 372 MHz at 1.3V. Closest achievable to 371.25 MHz with 12 MHz XOSC
+    // (0.2% high -> 74.4 MHz pixel clock, within HDMI tolerance for 720p60).
+    vreg_set_voltage(VREG_VOLTAGE_1_30);
+    sleep_ms(10);
+    set_sys_clock_khz(372000, true);
+#else
+    // 480p60: set system clock to 126 MHz for HSTX timing (25.2 MHz pixel clock).
     set_sys_clock_khz(126000, true);
+#endif
 
     stdio_init_all();
 

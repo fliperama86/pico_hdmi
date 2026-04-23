@@ -1,5 +1,7 @@
 #include "pico_hdmi/hstx_packet.h"
 
+#include "pico_hdmi/video_output.h" // for MODE_SYNC_POSITIVE
+
 #include <string.h>
 
 // ============================================================================
@@ -289,9 +291,14 @@ static void encode_subpackets_to_lanes(const hstx_packet_t *packet, uint16_t *la
 
 void hstx_encode_data_island(hstx_data_island_t *out, const hstx_packet_t *packet, bool vsync_active, bool hsync_active)
 {
-    // REVERTED: vsync_active/hsync_active indicate pulse region, not signal level
-    // For 640x480 (negative polarity), pulse region means signal=0
+    // vsync_active/hsync_active indicate pulse region, not wire level.
+    // The hv field encodes the actual wire bits (bit1=vsync, bit0=hsync), so
+    // pulse-region semantics are inverted for negative-polarity modes.
+#ifdef MODE_SYNC_POSITIVE
+    int hv = (vsync_active ? 2 : 0) | (hsync_active ? 1 : 0);
+#else
     int hv = (vsync_active ? 0 : 2) | (hsync_active ? 0 : 1);
+#endif
     uint16_t lane0[32];
     uint16_t lane1[32];
     uint16_t lane2[32];

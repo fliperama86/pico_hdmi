@@ -24,6 +24,19 @@ make
 
 Flash the resulting `bouncing_box.uf2` to your Pico 2.
 
+### 720p Variant (experimental)
+
+The demo can also be built at 1280x720 @ 60Hz. This requires overclocking to 372 MHz at 1.3V core voltage and has only been verified on the Morph4K — other displays may not lock.
+
+```bash
+cd examples/bouncing_box
+mkdir build && cd build
+cmake -DBOUNCING_BOX_720P=ON ..
+make
+```
+
+In 720p mode audio remains enabled; the library places the HDMI Data Island in the back porch (hsync=40 px is too narrow to hold it) and uses positive sync polarity for CEA VIC 4.
+
 ### Hardware
 
 Requires HSTX pins connected to an HDMI connector:

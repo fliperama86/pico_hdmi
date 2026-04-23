@@ -1,5 +1,7 @@
 #include "pico_hdmi/hstx_data_island_queue.h"
 
+#include "pico_hdmi/video_output.h"
+
 #include <string.h>
 
 #include "pico.h"
@@ -31,7 +33,7 @@ void hstx_di_queue_init(void)
     hstx_packet_t packet;
     audio_sample_t samples[4] = {0};
     (void)hstx_packet_set_audio_samples(&packet, samples, 4, 0);
-    hstx_encode_data_island(&silence_packet, &packet, false, true);
+    hstx_encode_data_island(&silence_packet, &packet, false, DI_HSYNC_ACTIVE);
 }
 
 void hstx_di_queue_set_sample_rate(uint32_t sample_rate)

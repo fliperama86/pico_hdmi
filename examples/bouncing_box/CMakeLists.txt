@@ -20,6 +20,15 @@ add_executable(bouncing_box
     main.c
 )
 
+# Optional: build at 1280x720 @ 60 Hz (requires overclock to 372 MHz @ 1.3V).
+# Default is 640x480 @ 60 Hz at the stock 126 MHz clock.
+# Enable with: cmake -DBOUNCING_BOX_720P=ON ..
+option(BOUNCING_BOX_720P "Build bouncing_box in 1280x720 mode (requires overclock)" OFF)
+if (BOUNCING_BOX_720P)
+    target_compile_definitions(bouncing_box PRIVATE VIDEO_MODE_1280x720)
+    target_compile_definitions(pico_hdmi PRIVATE VIDEO_MODE_1280x720)
+endif()
+
 target_link_libraries(bouncing_box
     pico_stdlib
     pico_multicore

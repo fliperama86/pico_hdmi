@@ -1,6 +1,8 @@
 #ifndef VIDEO_OUTPUT_H
 #define VIDEO_OUTPUT_H
 
+#include "pico_hdmi/hstx_packet.h"
+
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -8,7 +10,7 @@
 // Video Output Configuration
 // ============================================================================
 
-// Video mode selection (define VIDEO_MODE_320x240 before including this header)
+// Video mode selection (define VIDEO_MODE_320x240 or VIDEO_MODE_1280x720 before including this header)
 #ifdef VIDEO_MODE_320x240
 
 // 1280x240 @ 60Hz - True 240p (Quad Clock Rate)
@@ -28,6 +30,28 @@
 // HSTX clock divider: clk_sys / 1 = 126 MHz -> 25.2 MHz pixel clock (with CSR_CLKDIV=5)
 #define MODE_HSTX_CLK_DIV 1
 #define MODE_HSTX_CSR_CLKDIV 5
+
+#elif defined(VIDEO_MODE_1280x720)
+
+// 1280x720 @ 60Hz (CEA VIC 4)
+// Pixel clock: 74.25 MHz (using sys_clk=372 MHz gives 74.4 MHz, within HDMI tolerance)
+// Sync polarity: both H and V are POSITIVE (unlike VIC 1's negative)
+#define MODE_H_FRONT_PORCH 110
+#define MODE_H_SYNC_WIDTH 40
+#define MODE_H_BACK_PORCH 220
+#define MODE_H_ACTIVE_PIXELS 1280
+
+#define MODE_V_FRONT_PORCH 5
+#define MODE_V_SYNC_WIDTH 5
+#define MODE_V_BACK_PORCH 20
+#define MODE_V_ACTIVE_LINES 720
+
+// HSTX clock: sys_clk / 1 = 372 MHz -> 74.4 MHz pixel clock (with CSR_CLKDIV=5)
+#define MODE_HSTX_CLK_DIV 1
+#define MODE_HSTX_CSR_CLKDIV 5
+
+// 720p60 uses positive sync polarity on both H and V
+#define MODE_SYNC_POSITIVE 1
 
 #else
 
@@ -51,6 +75,15 @@
 
 #define MODE_H_TOTAL_PIXELS (MODE_H_FRONT_PORCH + MODE_H_SYNC_WIDTH + MODE_H_BACK_PORCH + MODE_H_ACTIVE_PIXELS)
 #define MODE_V_TOTAL_LINES (MODE_V_FRONT_PORCH + MODE_V_SYNC_WIDTH + MODE_V_BACK_PORCH + MODE_V_ACTIVE_LINES)
+
+// Data Island placement: true if the DI fits inside the hsync pulse (480p, 240p);
+// false if it must be placed in the back porch instead (720p60).
+// Callers of hstx_encode_data_island pass this as the hsync_active parameter.
+#if MODE_H_SYNC_WIDTH >= (W_PREAMBLE + W_DATA_ISLAND)
+#define DI_HSYNC_ACTIVE true
+#else
+#define DI_HSYNC_ACTIVE false
+#endif
 
 // Frame dimensions (set via video_output_init)
 extern uint16_t frame_width;
