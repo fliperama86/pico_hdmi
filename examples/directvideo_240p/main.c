@@ -95,20 +95,18 @@ static void generate_audio(void)
 // Scanline Callback (runs on Core 1)
 // ============================================================================
 
-void __scratch_x("") scanline_callback(uint32_t v_scanline, uint32_t active_line, uint32_t *dst)
+static void __scratch_x("") scanline_callback(uint32_t v_scanline, uint32_t active_line, uint32_t *dst)
 {
     (void)v_scanline;
     (void)active_line;
 
-    // Draw 8 color bars, each 160 pixels wide (1280 / 8 = 160)
+    // 8 color bars across FRAME_WIDTH (2 px per uint32_t)
+    int bar_width = FRAME_WIDTH / 8;
     for (int bar = 0; bar < 8; bar++) {
         uint16_t color = color_bars[bar];
-        // Pack two pixels into each uint32_t
         uint32_t packed = color | (color << 16);
-
-        // 160 pixels per bar -> 80 uint32_t words
-        int start = bar * 160 / 2;
-        int end = (bar + 1) * 160 / 2;
+        int start = bar * bar_width / 2;
+        int end = (bar + 1) * bar_width / 2;
         for (int i = start; i < end; i++) {
             dst[i] = packed;
         }
@@ -121,15 +119,16 @@ void __scratch_x("") scanline_callback(uint32_t v_scanline, uint32_t active_line
 
 int main(void)
 {
-    // Set system clock to 126 MHz (gives 25.2 MHz pixel clock)
+    sleep_ms(1000);
     set_sys_clock_khz(126000, true);
     stdio_init_all();
 
-    // Initialize LED for heartbeat
     gpio_init(PICO_DEFAULT_LED_PIN);
     gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);
 
-    // Initialize audio
+    sleep_ms(500);
+    stdio_flush();
+
     init_sine_table();
     phase_increment = (uint32_t)(((uint64_t)TONE_FREQ << 32) / AUDIO_SAMPLE_RATE);
 
@@ -138,17 +137,16 @@ int main(void)
     video_output_set_mode(&video_mode_240_p);
     video_output_init(FRAME_WIDTH, FRAME_HEIGHT);
 
-    // Use HDMI mode for audio + AVI InfoFrame
     video_output_set_dvi_mode(false);
-
-    // Register scanline callback
     video_output_set_scanline_callback(scanline_callback);
 
-    // Pre-fill audio buffer
     generate_audio();
 
-    // Launch Core 1 for HSTX output
+    sleep_ms(200);
+    stdio_flush();
+
     multicore_launch_core1(video_output_core1_run);
+    sleep_ms(100);
 
     // Main loop - audio generation on Core 0 (separate from DMA IRQs on Core 1)
     uint32_t last_frame = 0;

@@ -80,8 +80,10 @@
 // false if it must be placed in the back porch instead (720p60).
 // Callers of hstx_encode_data_island pass this as the hsync_active parameter.
 #if MODE_H_SYNC_WIDTH >= (W_PREAMBLE + W_DATA_ISLAND)
+#define DI_IN_HSYNC 1
 #define DI_HSYNC_ACTIVE true
 #else
+#define DI_IN_HSYNC 0
 #define DI_HSYNC_ACTIVE false
 #endif
 

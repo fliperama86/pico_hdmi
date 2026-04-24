@@ -25,6 +25,7 @@ typedef struct {
 
 extern const video_mode_t video_mode_480_p;
 extern const video_mode_t video_mode_240_p;
+extern const video_mode_t video_mode_720_p;
 extern const video_mode_t *video_output_active_mode;
 
 // ============================================================================

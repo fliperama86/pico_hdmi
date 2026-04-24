@@ -3,6 +3,7 @@
 #include "pico_hdmi/hstx_data_island_queue.h"
 #include "pico_hdmi/hstx_packet.h"
 #include "pico_hdmi/hstx_pins.h"
+#include "pico_hdmi/video_output.h" // for MODE_SYNC_POSITIVE, DI_IN_HSYNC, DI_HSYNC_ACTIVE
 
 #include "pico/stdlib.h"
 
@@ -28,21 +29,39 @@
 #define TMDS_CTRL_10 0x154u // vsync=1 hsync=0
 #define TMDS_CTRL_11 0x2abu // vsync=1 hsync=1
 
+// Polarity indirection: all modes registered in a single rt build must share
+// sync polarity and DI placement. Controlled by MODE_SYNC_POSITIVE (set
+// compile-time via VIDEO_MODE_1280x720 in video_output.h, included below).
+#ifdef MODE_SYNC_POSITIVE
+#define _TMDS_VON_HON TMDS_CTRL_11
+#define _TMDS_VON_HOFF TMDS_CTRL_10
+#define _TMDS_VOFF_HON TMDS_CTRL_01
+#define _TMDS_VOFF_HOFF TMDS_CTRL_00
+#else
+#define _TMDS_VON_HON TMDS_CTRL_00
+#define _TMDS_VON_HOFF TMDS_CTRL_01
+#define _TMDS_VOFF_HON TMDS_CTRL_10
+#define _TMDS_VOFF_HOFF TMDS_CTRL_11
+#endif
+
 // Sync symbols: Lane 0 carries sync, Lanes 1&2 are always CTRL_00
-#define SYNC_V0_H0 (TMDS_CTRL_00 | (TMDS_CTRL_00 << 10) | (TMDS_CTRL_00 << 20))
-#define SYNC_V0_H1 (TMDS_CTRL_01 | (TMDS_CTRL_00 << 10) | (TMDS_CTRL_00 << 20))
-#define SYNC_V1_H0 (TMDS_CTRL_10 | (TMDS_CTRL_00 << 10) | (TMDS_CTRL_00 << 20))
-#define SYNC_V1_H1 (TMDS_CTRL_11 | (TMDS_CTRL_00 << 10) | (TMDS_CTRL_00 << 20))
+// Naming: V0 = vsync asserted, V1 = vsync inactive; H0 = hsync asserted, H1 = hsync inactive
+#define SYNC_V0_H0 (_TMDS_VON_HON | (TMDS_CTRL_00 << 10) | (TMDS_CTRL_00 << 20))
+#define SYNC_V0_H1 (_TMDS_VON_HOFF | (TMDS_CTRL_00 << 10) | (TMDS_CTRL_00 << 20))
+#define SYNC_V1_H0 (_TMDS_VOFF_HON | (TMDS_CTRL_00 << 10) | (TMDS_CTRL_00 << 20))
+#define SYNC_V1_H1 (_TMDS_VOFF_HOFF | (TMDS_CTRL_00 << 10) | (TMDS_CTRL_00 << 20))
 
 // Data Island preamble: Lane 0 = sync, Lanes 1&2 = CTRL_01 pattern
 // Per HDMI 1.3a Table 5-2: CTL0=1, CTL1=0, CTL2=1, CTL3=0
-#define PREAMBLE_V0_H0 (TMDS_CTRL_00 | (TMDS_CTRL_01 << 10) | (TMDS_CTRL_01 << 20))
-#define PREAMBLE_V1_H0 (TMDS_CTRL_10 | (TMDS_CTRL_01 << 10) | (TMDS_CTRL_01 << 20))
+#define PREAMBLE_V0_H0 (_TMDS_VON_HON | (TMDS_CTRL_01 << 10) | (TMDS_CTRL_01 << 20))
+#define PREAMBLE_V1_H0 (_TMDS_VOFF_HON | (TMDS_CTRL_01 << 10) | (TMDS_CTRL_01 << 20))
+#define PREAMBLE_V0_H1 (_TMDS_VON_HOFF | (TMDS_CTRL_01 << 10) | (TMDS_CTRL_01 << 20))
+#define PREAMBLE_V1_H1 (_TMDS_VOFF_HOFF | (TMDS_CTRL_01 << 10) | (TMDS_CTRL_01 << 20))
 
 // Video preamble: Lane 0 = sync, Lane 1 = CTRL_01, Lane 2 = CTRL_00
 // Per HDMI 1.3a Table 5-2: CTL0=1, CTL1=0, CTL2=0, CTL3=0
-#define VIDEO_PREAMBLE_V0_H1 (TMDS_CTRL_01 | (TMDS_CTRL_01 << 10) | (TMDS_CTRL_00 << 20))
-#define VIDEO_PREAMBLE_V1_H1 (TMDS_CTRL_11 | (TMDS_CTRL_01 << 10) | (TMDS_CTRL_00 << 20))
+#define VIDEO_PREAMBLE_V0_H1 (_TMDS_VON_HOFF | (TMDS_CTRL_01 << 10) | (TMDS_CTRL_00 << 20))
+#define VIDEO_PREAMBLE_V1_H1 (_TMDS_VOFF_HOFF | (TMDS_CTRL_01 << 10) | (TMDS_CTRL_00 << 20))
 
 // Video guard band: Per HDMI 1.3a Table 5-5
 // CH0 = 0b1011001100 (0x2CC), CH1 = 0b0100110011 (0x133), CH2 = 0b1011001100 (0x2CC)
@@ -88,6 +107,24 @@ const video_mode_t video_mode_240_p = {
     .v_active_lines = 240,
     .h_total_pixels = 1600,
     .v_total_lines = 262,
+    .hstx_clk_div = 1,
+    .hstx_csr_clkdiv = 5,
+};
+
+// CEA VIC 4: 1280x720 @ 60Hz. Requires building with VIDEO_MODE_1280x720 so the
+// compile-time sync polarity (positive) and DI placement (back porch) match.
+// Pixel clock 74.25 MHz; expect sys_clk = 372 MHz and vreg = 1.30V.
+const video_mode_t video_mode_720_p = {
+    .h_front_porch = 110,
+    .h_sync_width = 40,
+    .h_back_porch = 220,
+    .h_active_pixels = 1280,
+    .v_front_porch = 5,
+    .v_sync_width = 5,
+    .v_back_porch = 20,
+    .v_active_lines = 720,
+    .h_total_pixels = 1650,
+    .v_total_lines = 750,
     .hstx_clk_div = 1,
     .hstx_csr_clkdiv = 5,
 };
@@ -265,6 +302,9 @@ static uint32_t build_line_with_di(uint32_t *buf, const uint32_t *di_words, bool
     uint32_t *p = buf;
     uint32_t sync_h0 = vsync ? SYNC_V0_H0 : SYNC_V1_H0;
     uint32_t sync_h1 = vsync ? SYNC_V0_H1 : SYNC_V1_H1;
+
+#if DI_IN_HSYNC
+    // DI inside the hsync pulse (original layout, wide-hsync modes: 480p, 240p)
     uint32_t preamble = vsync ? PREAMBLE_V0_H0 : PREAMBLE_V1_H0;
 
     *p++ = HSTX_CMD_RAW_REPEAT | rt_h_front_porch;
@@ -285,30 +325,68 @@ static uint32_t build_line_with_di(uint32_t *buf, const uint32_t *di_words, bool
     *p++ = HSTX_CMD_NOP;
 
     if (active) {
-        // HDMI 1.3a Section 5.2.2: Video Data Period requires preamble and guard band
         uint32_t video_preamble = vsync ? VIDEO_PREAMBLE_V0_H1 : VIDEO_PREAMBLE_V1_H1;
 
-        // Control period (back porch minus preamble and guard band)
         *p++ = HSTX_CMD_RAW_REPEAT | (rt_h_back_porch - W_VIDEO_PREAMBLE - W_VIDEO_GUARD_BAND);
         *p++ = sync_h1;
         *p++ = HSTX_CMD_NOP;
 
-        // Video Preamble (8 pixels)
         *p++ = HSTX_CMD_RAW_REPEAT | W_VIDEO_PREAMBLE;
         *p++ = video_preamble;
         *p++ = HSTX_CMD_NOP;
 
-        // Video Guard Band (2 pixels)
         *p++ = HSTX_CMD_RAW_REPEAT | W_VIDEO_GUARD_BAND;
         *p++ = VIDEO_GUARD_BAND;
 
-        // Active video pixels
         *p++ = HSTX_CMD_TMDS | rt_h_active_pixels;
     } else {
         *p++ = HSTX_CMD_RAW_REPEAT | (rt_h_back_porch + rt_h_active_pixels);
         *p++ = sync_h1;
         *p++ = HSTX_CMD_NOP;
     }
+#else
+    // DI in back porch, after hsync pulse (narrow-hsync modes: 720p60)
+    uint32_t preamble = vsync ? PREAMBLE_V0_H1 : PREAMBLE_V1_H1;
+
+    *p++ = HSTX_CMD_RAW_REPEAT | rt_h_front_porch;
+    *p++ = sync_h1;
+    *p++ = HSTX_CMD_NOP;
+
+    *p++ = HSTX_CMD_RAW_REPEAT | rt_h_sync_width;
+    *p++ = sync_h0;
+    *p++ = HSTX_CMD_NOP;
+
+    *p++ = HSTX_CMD_RAW_REPEAT | W_PREAMBLE;
+    *p++ = preamble;
+    *p++ = HSTX_CMD_NOP;
+
+    *p++ = HSTX_CMD_RAW | W_DATA_ISLAND;
+    for (int i = 0; i < W_DATA_ISLAND; i++)
+        *p++ = di_words[i];
+    *p++ = HSTX_CMD_NOP;
+
+    if (active) {
+        uint32_t video_preamble = vsync ? VIDEO_PREAMBLE_V0_H1 : VIDEO_PREAMBLE_V1_H1;
+
+        *p++ = HSTX_CMD_RAW_REPEAT |
+               (rt_h_back_porch - W_PREAMBLE - W_DATA_ISLAND - W_VIDEO_PREAMBLE - W_VIDEO_GUARD_BAND);
+        *p++ = sync_h1;
+        *p++ = HSTX_CMD_NOP;
+
+        *p++ = HSTX_CMD_RAW_REPEAT | W_VIDEO_PREAMBLE;
+        *p++ = video_preamble;
+        *p++ = HSTX_CMD_NOP;
+
+        *p++ = HSTX_CMD_RAW_REPEAT | W_VIDEO_GUARD_BAND;
+        *p++ = VIDEO_GUARD_BAND;
+
+        *p++ = HSTX_CMD_TMDS | rt_h_active_pixels;
+    } else {
+        *p++ = HSTX_CMD_RAW_REPEAT | (rt_h_back_porch - W_PREAMBLE - W_DATA_ISLAND + rt_h_active_pixels);
+        *p++ = sync_h1;
+        *p++ = HSTX_CMD_NOP;
+    }
+#endif
     return (uint32_t)(p - buf);
 }
 
@@ -531,15 +609,15 @@ static void configure_audio_packets(uint32_t sample_rate)
     uint32_t acr_cts;
     get_acr_params(sample_rate, &acr_n, &acr_cts);
     hstx_packet_set_acr(&packet, acr_n, acr_cts);
-    hstx_encode_data_island(&island, &packet, true, true);
+    hstx_encode_data_island(&island, &packet, true, DI_HSYNC_ACTIVE);
     vblank_acr_vsync_on_len = build_line_with_di(vblank_acr_vsync_on, island.words, true, false);
-    hstx_encode_data_island(&island, &packet, false, true);
+    hstx_encode_data_island(&island, &packet, false, DI_HSYNC_ACTIVE);
     vblank_acr_vsync_off_len = build_line_with_di(vblank_acr_vsync_off, island.words, false, false);
 
     hstx_packet_set_audio_infoframe(&packet, sample_rate, 2, 16);
-    hstx_encode_data_island(&island, &packet, true, true);
+    hstx_encode_data_island(&island, &packet, true, DI_HSYNC_ACTIVE);
     vblank_infoframe_vsync_on_len = build_line_with_di(vblank_infoframe_vsync_on, island.words, true, false);
-    hstx_encode_data_island(&island, &packet, false, true);
+    hstx_encode_data_island(&island, &packet, false, DI_HSYNC_ACTIVE);
     vblank_infoframe_vsync_off_len = build_line_with_di(vblank_infoframe_vsync_off, island.words, false, false);
 }
 
@@ -565,16 +643,18 @@ static void build_all_command_lists(const video_mode_t *mode)
     // validation by sinks. Our 25.2 MHz is 0.1% off from standard 25.175 MHz.
     hstx_packet_t packet;
     hstx_data_island_t island;
-    uint8_t vic = (mode->v_active_lines == 480) ? 1 : 0;
+    uint8_t vic = (mode->v_active_lines == 480) ? 1 : (mode->v_active_lines == 720) ? 4 : 0;
     hstx_packet_set_avi_infoframe(&packet, vic, 0);
-    hstx_encode_data_island(&island, &packet, false, true);
+    hstx_encode_data_island(&island, &packet, false, DI_HSYNC_ACTIVE);
     vblank_avi_infoframe_len = build_line_with_di(vblank_avi_infoframe, island.words, false, false);
 
     // Null DI command lists
-    vblank_di_null_len = build_line_with_di(vblank_di_null, hstx_get_null_data_island(false, true), false, false);
-    vactive_di_null_len = build_line_with_di(vactive_di_null, hstx_get_null_data_island(false, true), false, true);
+    vblank_di_null_len =
+        build_line_with_di(vblank_di_null, hstx_get_null_data_island(false, DI_HSYNC_ACTIVE), false, false);
+    vactive_di_null_len =
+        build_line_with_di(vactive_di_null, hstx_get_null_data_island(false, DI_HSYNC_ACTIVE), false, true);
 
-    vblank_di_len = build_line_with_di(vblank_di_ping, hstx_get_null_data_island(false, true), false, false);
+    vblank_di_len = build_line_with_di(vblank_di_ping, hstx_get_null_data_island(false, DI_HSYNC_ACTIVE), false, false);
     memcpy(vblank_di_pong, vblank_di_ping, sizeof(vblank_di_ping));
 }
 
@@ -796,9 +876,9 @@ void video_output_update_acr(uint32_t pixel_clock_hz)
     hstx_data_island_t island;
 
     hstx_packet_set_acr(&packet, acr_n, custom_cts);
-    hstx_encode_data_island(&island, &packet, true, true);
+    hstx_encode_data_island(&island, &packet, true, DI_HSYNC_ACTIVE);
     genlock_acr_vsync_on_len = build_line_with_di(genlock_acr_vsync_on, island.words, true, false);
-    hstx_encode_data_island(&island, &packet, false, true);
+    hstx_encode_data_island(&island, &packet, false, DI_HSYNC_ACTIVE);
     genlock_acr_vsync_off_len = build_line_with_di(genlock_acr_vsync_off, island.words, false, false);
 
     __dmb();
