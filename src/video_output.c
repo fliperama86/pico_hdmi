@@ -16,6 +16,7 @@
 #include "hardware/structs/hstx_fifo.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 // ============================================================================
@@ -153,6 +154,28 @@ static uint32_t vblank_acr_vsync_off[64], vblank_acr_vsync_off_len;
 static uint32_t vblank_infoframe_vsync_on[64], vblank_infoframe_vsync_on_len;
 static uint32_t vblank_infoframe_vsync_off[64], vblank_infoframe_vsync_off_len;
 static uint32_t vblank_avi_infoframe[64], vblank_avi_infoframe_len;
+
+#if defined(PICO_HDMI_DUMP_COMMAND_LISTS) && PICO_HDMI_DUMP_COMMAND_LISTS
+static void dump_command_list(const char *name, const uint32_t *words, uint32_t len)
+{
+    printf("pico_hdmi %s len=%lu", name, (unsigned long)len);
+    for (uint32_t i = 0; i < len; ++i) {
+        printf(" %08lx", (unsigned long)words[i]);
+    }
+    printf("\n");
+}
+
+static void dump_static_command_lists(void)
+{
+    printf("pico_hdmi mode h=%u,%u,%u,%u v=%u,%u,%u,%u hstx_clk_div=%u csr_clkdiv=%u di_in_hsync=%u\n",
+           MODE_H_FRONT_PORCH, MODE_H_SYNC_WIDTH, MODE_H_BACK_PORCH, MODE_H_ACTIVE_PIXELS, MODE_V_FRONT_PORCH,
+           MODE_V_SYNC_WIDTH, MODE_V_BACK_PORCH, MODE_V_ACTIVE_LINES, MODE_HSTX_CLK_DIV, MODE_HSTX_CSR_CLKDIV,
+           DI_IN_HSYNC);
+    dump_command_list("vblank_line_vsync_off", vblank_line_vsync_off, count_of(vblank_line_vsync_off));
+    dump_command_list("vblank_line_vsync_on", vblank_line_vsync_on, count_of(vblank_line_vsync_on));
+    dump_command_list("vactive_line_dvi", vactive_line_dvi, count_of(vactive_line_dvi));
+}
+#endif
 
 // ============================================================================
 // HSTX Resync - Reset output to sync with input VSYNC
@@ -515,6 +538,10 @@ void video_output_init(uint16_t width, uint16_t height)
 {
     frame_width = width;
     frame_height = height;
+
+#if defined(PICO_HDMI_DUMP_COMMAND_LISTS) && PICO_HDMI_DUMP_COMMAND_LISTS
+    dump_static_command_lists();
+#endif
 
     // Configure clk_hstx for the current video mode
     // After set_sys_clock_khz(), clk_hstx needs to be reconfigured

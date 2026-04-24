@@ -18,6 +18,7 @@
 #include "hardware/sync.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 // ============================================================================
@@ -202,6 +203,28 @@ static uint32_t genlock_acr_vsync_on[64], genlock_acr_vsync_on_len;
 static uint32_t genlock_acr_vsync_off[64], genlock_acr_vsync_off_len;
 static bool use_genlock_acr = false;
 
+#if defined(PICO_HDMI_DUMP_COMMAND_LISTS) && PICO_HDMI_DUMP_COMMAND_LISTS
+static void dump_command_list(const char *name, const uint32_t *words, uint32_t len)
+{
+    printf("pico_hdmi %s len=%lu", name, (unsigned long)len);
+    for (uint32_t i = 0; i < len; ++i) {
+        printf(" %08lx", (unsigned long)words[i]);
+    }
+    printf("\n");
+}
+
+static void dump_runtime_command_lists(const video_mode_t *mode)
+{
+    printf("pico_hdmi rt_mode h=%u,%u,%u,%u v=%u,%u,%u,%u hstx_clk_div=%u csr_clkdiv=%u di_in_hsync=%u\n",
+           mode->h_front_porch, mode->h_sync_width, mode->h_back_porch, mode->h_active_pixels, mode->v_front_porch,
+           mode->v_sync_width, mode->v_back_porch, mode->v_active_lines, mode->hstx_clk_div, mode->hstx_csr_clkdiv,
+           DI_IN_HSYNC);
+    dump_command_list("vblank_line_vsync_off", vblank_line_vsync_off, 9);
+    dump_command_list("vblank_line_vsync_on", vblank_line_vsync_on, 9);
+    dump_command_list("vactive_line_dvi", vactive_line_dvi, 9);
+}
+#endif
+
 // ============================================================================
 // Build DVI Command Lists
 // ============================================================================
@@ -297,7 +320,7 @@ static void __scratch_x("") hstx_resync(void)
 // Internal Helpers
 // ============================================================================
 
-static uint32_t build_line_with_di(uint32_t *buf, const uint32_t *di_words, bool vsync, bool active)
+static uint32_t __scratch_x("") build_line_with_di(uint32_t *buf, const uint32_t *di_words, bool vsync, bool active)
 {
     uint32_t *p = buf;
     uint32_t sync_h0 = vsync ? SYNC_V0_H0 : SYNC_V1_H0;
@@ -639,6 +662,10 @@ static void build_all_command_lists(const video_mode_t *mode)
 {
     build_dvi_command_lists();
 
+#if defined(PICO_HDMI_DUMP_COMMAND_LISTS) && PICO_HDMI_DUMP_COMMAND_LISTS
+    dump_runtime_command_lists(mode);
+#endif
+
     // AVI InfoFrame: VIC=0 (non-standard) to avoid strict pixel clock
     // validation by sinks. Our 25.2 MHz is 0.1% off from standard 25.175 MHz.
     hstx_packet_t packet;
@@ -701,8 +728,10 @@ void video_output_init(uint16_t width, uint16_t height)
         pending_mode = NULL;
         initial_mode = pm;
     } else {
-#ifdef VIDEO_MODE_320x240
-        initial_mode = &VIDEO_MODE_240P;
+#ifdef VIDEO_MODE_1280x720
+        initial_mode = &video_mode_720_p;
+#elif defined(VIDEO_MODE_320x240)
+        initial_mode = &video_mode_240_p;
 #else
         initial_mode = &video_mode_480_p;
 #endif

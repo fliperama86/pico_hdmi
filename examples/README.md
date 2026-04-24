@@ -46,6 +46,30 @@ Requires HSTX pins connected to an HDMI connector:
 - GPIO 16-17: Data 1 (Green)
 - GPIO 18-19: Data 2 (Red)
 
+## bouncing_box_rt
+
+Same bouncing-box visuals as `bouncing_box`, but driven through the
+runtime-mode-switching variant of the library (`video_output_rt.c`) at
+1280x720 @ 60Hz. Demonstrates using the rt API with a CEA mode that needs
+positive sync polarity and back-porch Data Island placement.
+
+The CMakeLists forces `PICO_HDMI_RUNTIME_MODES=ON` and defines
+`VIDEO_MODE_1280x720` on **both** the library target and the executable —
+`DI_HSYNC_ACTIVE` is a compile-time macro whose value depends on the active
+`VIDEO_MODE_*`, and a mismatch between the library's view and the
+executable's view corrupts the embedded HSYNC bits in audio Data Island
+packets.
+
+Requires overclocking to 372 MHz at 1.3V, same as the bouncing_box 720p
+variant. Tested reliably on the Morph4K.
+
+```bash
+cd examples/bouncing_box_rt
+mkdir build && cd build
+cmake ..
+make
+```
+
 ## directvideo_240p
 
 True 240p output for retro gaming scalers (Morph4K, RetroTINK 4K, OSSC, etc.):

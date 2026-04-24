@@ -1,4 +1,5 @@
 option(PICO_HDMI_RUNTIME_MODES "Use runtime video mode switching (video_output_rt)" OFF)
+option(PICO_HDMI_DUMP_COMMAND_LISTS "Print generated HDMI/HSTX command lists at startup" OFF)
 
 if(PICO_HDMI_RUNTIME_MODES)
     set(PICO_HDMI_VIDEO_OUTPUT_SRC src/video_output_rt.c)
@@ -23,3 +24,7 @@ target_link_libraries(pico_hdmi
     hardware_irq
     hardware_gpio
 )
+
+if(PICO_HDMI_DUMP_COMMAND_LISTS)
+    target_compile_definitions(pico_hdmi PRIVATE PICO_HDMI_DUMP_COMMAND_LISTS=1)
+endif()
