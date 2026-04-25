@@ -2,6 +2,18 @@
 
 Example projects demonstrating the pico_hdmi HDMI output library for RP2350.
 
+## Prebuilt Release UF2s
+
+The GitHub release assets include these ready-to-flash bouncing-box demos:
+
+| Asset | Mode | HDMI path |
+|-------|------|-----------|
+| `bouncing_box.uf2` | 640x480 @ 60Hz | Non-RT / compile-time |
+| `bouncing_box_720p_nonrt.uf2` | 1280x720 @ 60Hz | Non-RT / compile-time |
+| `bouncing_box_720p_rt.uf2` | 1280x720 @ 60Hz | Runtime-mode (`video_output_rt.c`) |
+
+Both 720p UF2s require 372 MHz sys_clk and 1.3V core voltage; the demos set this at startup.
+
 ## bouncing_box
 
 Simple animated demo showing:
@@ -24,18 +36,18 @@ make
 
 Flash the resulting `bouncing_box.uf2` to your Pico 2.
 
-### 720p Variant (experimental)
+### 720p Non-RT Variant (experimental)
 
-The demo can also be built at 1280x720 @ 60Hz. This requires overclocking to 372 MHz at 1.3V core voltage and has only been verified on the Morph4K — other displays may not lock.
+The demo can also be built at 1280x720 @ 60Hz. This requires overclocking to 372 MHz at 1.3V core voltage; validate it on the target sink before relying on it.
 
 ```bash
 cd examples/bouncing_box
 mkdir build && cd build
-cmake -DBOUNCING_BOX_720P=ON ..
+cmake -DBOUNCING_BOX_720P=ON -DPICO_HDMI_RUNTIME_MODES=OFF ..
 make
 ```
 
-In 720p mode audio remains enabled; the library places the HDMI Data Island in the back porch (hsync=40 px is too narrow to hold it) and uses positive sync polarity for CEA VIC 4.
+In 720p mode audio remains enabled; the library places the HDMI Data Island in the back porch (hsync=40 px is too narrow to hold it) and uses positive sync polarity for CEA VIC 4. This is the non-RT / compile-time 720p path.
 
 ### Hardware
 

@@ -33,6 +33,18 @@ The library automatically handles sync polarity and Data Island placement per mo
 
 The HSTX output pins are configured for fast slew and 12mA drive. This gives the RP2350 enough edge margin for 720p60 on stricter sinks; weaker default pad settings can produce corruption or sync loss at 720p even when 480p is stable.
 
+## Prebuilt Demo UF2s
+
+GitHub Releases include ready-to-flash bouncing-box firmware for Pico 2:
+
+| Asset | Mode | HDMI path | Notes |
+|-------|------|-----------|-------|
+| `bouncing_box.uf2` | 640x480 @ 60Hz | Non-RT / compile-time | Default stable VGA/480p demo |
+| `bouncing_box_720p_nonrt.uf2` | 1280x720 @ 60Hz | Non-RT / compile-time | Uses `VIDEO_MODE_1280x720`; recommended for validating the compile-time 720p path |
+| `bouncing_box_720p_rt.uf2` | 1280x720 @ 60Hz | Runtime-mode (`video_output_rt.c`) | Uses the runtime-mode HDMI backend at CEA VIC 4 |
+
+Both 720p builds require the RP2350 to run at 372 MHz with 1.3V core voltage. The demo configures those clocks at startup.
+
 ## Audio Sample Rate
 
 By default, HDMI audio is configured for 48kHz. To use a different sample rate (44100 Hz for example), call `pico_hdmi_set_audio_sample_rate()` after `video_output_init()`:
