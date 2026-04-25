@@ -29,6 +29,11 @@ if (BOUNCING_BOX_720P)
     target_compile_definitions(pico_hdmi PRIVATE VIDEO_MODE_1280x720)
 endif()
 
+option(BOUNCING_BOX_DVI_ONLY "Build bouncing_box without HDMI Data Islands/audio" OFF)
+if (BOUNCING_BOX_DVI_ONLY)
+    target_compile_definitions(bouncing_box PRIVATE BOUNCING_BOX_DVI_ONLY)
+endif()
+
 target_link_libraries(bouncing_box
     pico_stdlib
     pico_multicore

@@ -840,8 +840,11 @@ void video_output_core1_run(void)
         tight_loop_contents();
 
     // NOW connect GPIO — TV's first TMDS exposure is valid data
-    for (int i = PIN_HSTX_CLK; i <= PIN_HSTX_D2 + 1; ++i)
+    for (int i = PIN_HSTX_CLK; i <= PIN_HSTX_D2 + 1; ++i) {
         gpio_set_function(i, 0);
+        gpio_set_slew_rate(i, GPIO_SLEW_RATE_FAST);
+        gpio_set_drive_strength(i, GPIO_DRIVE_STRENGTH_12MA);
+    }
 
     while (1) {
         // Check for pending mode switch

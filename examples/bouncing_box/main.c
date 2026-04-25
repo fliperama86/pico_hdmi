@@ -212,20 +212,27 @@ int main(void)
 
     sleep_ms(1000);
 
+#ifndef BOUNCING_BOX_DVI_ONLY
     // Initialize audio
     init_sine_table();
     note_frames_remaining = current_melody[0].duration;
     phase_increment = (uint32_t)(((uint64_t)current_melody[0].freq << 32) / AUDIO_SAMPLE_RATE);
+#endif
 
     // Initialize HDMI output
     hstx_di_queue_init();
     video_output_init(FRAME_WIDTH, FRAME_HEIGHT);
+#ifdef BOUNCING_BOX_DVI_ONLY
+    video_output_set_dvi_mode(true);
+#endif
 
     // Register scanline callback
     video_output_set_scanline_callback(scanline_callback);
 
+#ifndef BOUNCING_BOX_DVI_ONLY
     // Pre-fill audio buffer
     generate_audio();
+#endif
 
     // Launch Core 1 for HSTX output
     multicore_launch_core1(video_output_core1_run);
@@ -236,11 +243,15 @@ int main(void)
     bool led_state = false;
 
     while (1) {
+#ifndef BOUNCING_BOX_DVI_ONLY
         // Keep audio buffer fed
         generate_audio();
+#endif
 
         while (video_frame_count == last_frame) {
+#ifndef BOUNCING_BOX_DVI_ONLY
             generate_audio();
+#endif
             tight_loop_contents();
         }
         last_frame = video_frame_count;
@@ -248,8 +259,10 @@ int main(void)
         // Update animation
         update_box();
 
+#ifndef BOUNCING_BOX_DVI_ONLY
         // Advance melody (one note step per frame)
         advance_melody();
+#endif
 
         // LED heartbeat
         if ((video_frame_count % 30) == 0) {
