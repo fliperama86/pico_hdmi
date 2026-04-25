@@ -515,6 +515,15 @@ static void configure_audio_packets(uint32_t sample_rate)
 {
     hstx_di_queue_set_sample_rate(sample_rate);
 
+    // Derive the audio packet cadence from the actual pixel clock instead of
+    // assuming exactly 60.000 Hz. 720p currently runs from 372 MHz sys_clk
+    // (74.4 MHz pixel clock), so frame rate is slightly above nominal CEA 60 Hz.
+    // ACR still advertises 48 kHz; if we also emit 800 samples every video
+    // frame, stricter sinks eventually overflow their audio clock domain.
+    uint32_t pixel_clock_hz = clock_get_hz(clk_hstx) / MODE_HSTX_CSR_CLKDIV;
+    uint32_t spl_fp = (uint32_t)(((uint64_t)sample_rate * MODE_H_TOTAL_PIXELS << 16) / pixel_clock_hz);
+    hstx_di_queue_set_samples_per_line_fp(spl_fp);
+
     hstx_packet_t packet;
     hstx_data_island_t island;
 
