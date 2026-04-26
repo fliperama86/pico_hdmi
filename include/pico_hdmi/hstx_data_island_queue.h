@@ -36,6 +36,13 @@ uint32_t hstx_di_queue_get_level(void);
 void hstx_di_queue_set_v_total(uint32_t v_total);
 
 /**
+ * Set whether queued/silent audio Data Islands are encoded during the hsync
+ * pulse. Wide-hsync modes use true; narrow-hsync modes such as 720p use false.
+ */
+void hstx_di_queue_set_hsync_active(bool hsync_active);
+bool hstx_di_queue_get_hsync_active(void);
+
+/**
  * Override samples_per_line with a pixel-clock-accurate 16.16 fixed-point value.
  * Use this instead of set_sample_rate when the frame rate is not exactly 60 Hz.
  * @param value samples_per_line in 16.16 fixed-point

@@ -21,6 +21,8 @@ typedef struct {
     uint16_t v_total_lines;
     uint8_t hstx_clk_div;
     uint8_t hstx_csr_clkdiv;
+    bool sync_positive;
+    bool data_island_in_hsync;
 } video_mode_t;
 
 extern const video_mode_t video_mode_480_p;

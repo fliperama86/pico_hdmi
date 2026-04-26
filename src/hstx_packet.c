@@ -4,6 +4,10 @@
 
 #include <string.h>
 
+#ifndef PICO_HDMI_RT_RUNTIME_MODE_ATTRS
+#define PICO_HDMI_RT_RUNTIME_MODE_ATTRS 0
+#endif
+
 // ============================================================================
 // TERC4 Symbol Table (4-bit to 10-bit encoding)
 // ============================================================================
@@ -28,6 +32,19 @@ static const uint16_t ter_c4[16] = {
 };
 
 #define GUARD_BAND_SYMBOL 0x133u // 0b0100110011
+
+#ifdef MODE_SYNC_POSITIVE
+#define HSTX_PACKET_DEFAULT_SYNC_POSITIVE true
+#else
+#define HSTX_PACKET_DEFAULT_SYNC_POSITIVE false
+#endif
+
+static hstx_data_island_t null_islands[4];
+static bool null_islands_initialized = false;
+
+#if PICO_HDMI_RT_RUNTIME_MODE_ATTRS
+static bool packet_sync_positive = HSTX_PACKET_DEFAULT_SYNC_POSITIVE;
+#endif
 
 // ============================================================================
 // BCH Encoding
@@ -130,6 +147,27 @@ void hstx_packet_set_null(hstx_packet_t *packet)
 {
     hstx_packet_init(packet);
     compute_all_parity(packet);
+}
+
+void hstx_packet_set_sync_positive(bool positive)
+{
+#if PICO_HDMI_RT_RUNTIME_MODE_ATTRS
+    if (packet_sync_positive != positive) {
+        packet_sync_positive = positive;
+        null_islands_initialized = false;
+    }
+#else
+    (void)positive;
+#endif
+}
+
+bool hstx_packet_get_sync_positive(void)
+{
+#if PICO_HDMI_RT_RUNTIME_MODE_ATTRS
+    return packet_sync_positive;
+#else
+    return HSTX_PACKET_DEFAULT_SYNC_POSITIVE;
+#endif
 }
 
 void hstx_packet_set_acr(hstx_packet_t *packet, uint32_t n, uint32_t cts)
@@ -294,11 +332,8 @@ void hstx_encode_data_island(hstx_data_island_t *out, const hstx_packet_t *packe
     // vsync_active/hsync_active indicate pulse region, not wire level.
     // The hv field encodes the actual wire bits (bit1=vsync, bit0=hsync), so
     // pulse-region semantics are inverted for negative-polarity modes.
-#ifdef MODE_SYNC_POSITIVE
-    int hv = (vsync_active ? 2 : 0) | (hsync_active ? 1 : 0);
-#else
-    int hv = (vsync_active ? 0 : 2) | (hsync_active ? 0 : 1);
-#endif
+    const bool sync_positive = hstx_packet_get_sync_positive();
+    int hv = (vsync_active == sync_positive ? 2 : 0) | (hsync_active == sync_positive ? 1 : 0);
     uint16_t lane0[32];
     uint16_t lane1[32];
     uint16_t lane2[32];
@@ -316,9 +351,6 @@ void hstx_encode_data_island(hstx_data_island_t *out, const hstx_packet_t *packe
     out->words[34] = guard_word;
     out->words[35] = guard_word;
 }
-
-static hstx_data_island_t null_islands[4];
-static bool null_islands_initialized = false;
 
 static void init_null_islands(void)
 {

@@ -13,6 +13,7 @@ static volatile uint32_t di_ring_tail = 0;
 
 // Single pre-encoded silent audio packet (fixed B-frame flags).
 static hstx_data_island_t silence_packet;
+static bool di_hsync_active = DI_HSYNC_ACTIVE;
 
 // Audio timing state (default 48kHz, 525 lines for 480p)
 static uint32_t audio_sample_accum = 0; // Fixed-point accumulator
@@ -24,16 +25,20 @@ static uint32_t samples_per_line_fp = (DEFAULT_SAMPLES_PER_FRAME << 16) / 525;
 // Clamping to 1 packet (plus a tiny margin is implicit) ensures we don't burst.
 #define MAX_AUDIO_ACCUM (4 << 16)
 
+static void hstx_di_queue_build_silence_packet(void)
+{
+    hstx_packet_t packet;
+    audio_sample_t samples[4] = {0};
+    (void)hstx_packet_set_audio_samples(&packet, samples, 4, 0);
+    hstx_encode_data_island(&silence_packet, &packet, false, di_hsync_active);
+}
+
 void hstx_di_queue_init(void)
 {
     di_ring_head = 0;
     di_ring_tail = 0;
     audio_sample_accum = 0;
-    // Build a single silent audio packet.
-    hstx_packet_t packet;
-    audio_sample_t samples[4] = {0};
-    (void)hstx_packet_set_audio_samples(&packet, samples, 4, 0);
-    hstx_encode_data_island(&silence_packet, &packet, false, DI_HSYNC_ACTIVE);
+    hstx_di_queue_build_silence_packet();
 }
 
 void hstx_di_queue_set_sample_rate(uint32_t sample_rate)
@@ -45,6 +50,22 @@ void hstx_di_queue_set_sample_rate(uint32_t sample_rate)
 void hstx_di_queue_set_v_total(uint32_t v_total)
 {
     cached_v_total_lines = v_total;
+}
+
+void hstx_di_queue_set_hsync_active(bool hsync_active)
+{
+    if (di_hsync_active != hsync_active) {
+        di_ring_head = 0;
+        di_ring_tail = 0;
+        audio_sample_accum = 0;
+    }
+    di_hsync_active = hsync_active;
+    hstx_di_queue_build_silence_packet();
+}
+
+bool hstx_di_queue_get_hsync_active(void)
+{
+    return di_hsync_active;
 }
 
 void hstx_di_queue_set_samples_per_line_fp(uint32_t value)
