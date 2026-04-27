@@ -6,6 +6,10 @@
 
 #include "pico.h"
 
+#ifndef PICO_HDMI_RAM_DI_QUEUE_PUSH
+#define PICO_HDMI_RAM_DI_QUEUE_PUSH 0
+#endif
+
 #define DI_RING_BUFFER_SIZE 256
 static hstx_data_island_t di_ring_buffer[DI_RING_BUFFER_SIZE];
 static volatile uint32_t di_ring_head = 0;
@@ -79,7 +83,11 @@ void hstx_di_queue_set_samples_per_line_fp(uint32_t value)
     samples_per_line_fp = value;
 }
 
+#if PICO_HDMI_RAM_DI_QUEUE_PUSH
+bool __not_in_flash_func(hstx_di_queue_push)(const hstx_data_island_t *island)
+#else
 bool hstx_di_queue_push(const hstx_data_island_t *island)
+#endif
 {
     uint32_t next_head = (di_ring_head + 1) % DI_RING_BUFFER_SIZE;
     if (next_head == di_ring_tail)

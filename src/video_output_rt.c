@@ -35,6 +35,16 @@
 #define PICO_HDMI_LINE_BUFFER_ATTR
 #endif
 
+#ifndef PICO_HDMI_ALIGN_DI_BUFFERS
+#define PICO_HDMI_ALIGN_DI_BUFFERS 0
+#endif
+
+#if PICO_HDMI_ALIGN_DI_BUFFERS
+#define HSTX_CMDLIST_ATTR __attribute__((aligned(16)))
+#else
+#define HSTX_CMDLIST_ATTR
+#endif
+
 // ============================================================================
 // DVI/HSTX Constants
 // ============================================================================
@@ -284,25 +294,33 @@ static volatile bool resync_requested = false;
 // ============================================================================
 
 // Pure DVI command lists (9 words each)
-static uint32_t vblank_line_vsync_off[9];
-static uint32_t vblank_line_vsync_on[9];
-static uint32_t vactive_line_dvi[9];
+static uint32_t vblank_line_vsync_off[9] HSTX_CMDLIST_ATTR;
+static uint32_t vblank_line_vsync_on[9] HSTX_CMDLIST_ATTR;
+static uint32_t vactive_line_dvi[9] HSTX_CMDLIST_ATTR;
 
-static uint32_t vactive_di_ping[128], vactive_di_pong[128], vactive_di_null[128];
+static uint32_t vactive_di_ping[128] HSTX_CMDLIST_ATTR;
+static uint32_t vactive_di_pong[128] HSTX_CMDLIST_ATTR;
+static uint32_t vactive_di_null[128] HSTX_CMDLIST_ATTR;
 static uint32_t vactive_di_len, vactive_di_null_len;
 
-static uint32_t vblank_di_ping[128], vblank_di_pong[128], vblank_di_null[128];
+static uint32_t vblank_di_ping[128] HSTX_CMDLIST_ATTR;
+static uint32_t vblank_di_pong[128] HSTX_CMDLIST_ATTR;
+static uint32_t vblank_di_null[128] HSTX_CMDLIST_ATTR;
 static uint32_t vblank_di_len, vblank_di_null_len;
 
-static uint32_t vblank_acr_vsync_on[64], vblank_acr_vsync_on_len;
-static uint32_t vblank_acr_vsync_off[64], vblank_acr_vsync_off_len;
-static uint32_t vblank_infoframe_vsync_on[64], vblank_infoframe_vsync_on_len;
-static uint32_t vblank_infoframe_vsync_off[64], vblank_infoframe_vsync_off_len;
-static uint32_t vblank_avi_infoframe[64], vblank_avi_infoframe_len;
+static uint32_t vblank_acr_vsync_on[64] HSTX_CMDLIST_ATTR;
+static uint32_t vblank_acr_vsync_off[64] HSTX_CMDLIST_ATTR;
+static uint32_t vblank_infoframe_vsync_on[64] HSTX_CMDLIST_ATTR;
+static uint32_t vblank_infoframe_vsync_off[64] HSTX_CMDLIST_ATTR;
+static uint32_t vblank_avi_infoframe[64] HSTX_CMDLIST_ATTR;
+static uint32_t vblank_acr_vsync_on_len, vblank_acr_vsync_off_len;
+static uint32_t vblank_infoframe_vsync_on_len, vblank_infoframe_vsync_off_len;
+static uint32_t vblank_avi_infoframe_len;
 
 // ACR command lists for genlock (custom CTS values)
-static uint32_t genlock_acr_vsync_on[64], genlock_acr_vsync_on_len;
-static uint32_t genlock_acr_vsync_off[64], genlock_acr_vsync_off_len;
+static uint32_t genlock_acr_vsync_on[64] HSTX_CMDLIST_ATTR;
+static uint32_t genlock_acr_vsync_off[64] HSTX_CMDLIST_ATTR;
+static uint32_t genlock_acr_vsync_on_len, genlock_acr_vsync_off_len;
 static bool use_genlock_acr = false;
 
 #if defined(PICO_HDMI_DUMP_COMMAND_LISTS) && PICO_HDMI_DUMP_COMMAND_LISTS
@@ -872,8 +890,9 @@ static void build_all_command_lists(const video_mode_t *mode)
     hstx_packet_t packet;
     hstx_data_island_t island;
     uint8_t vic = (mode->v_active_lines == 480) ? 1 : (mode->v_active_lines == 720) ? 4 : 0;
+    uint8_t pixel_repetition = (mode->v_active_lines == 240 && mode->h_active_pixels == 1280) ? 3 : 0;
     const bool di_hsync_active = data_island_hsync_active();
-    hstx_packet_set_avi_infoframe(&packet, vic, 0);
+    hstx_packet_set_avi_infoframe(&packet, vic, pixel_repetition);
     hstx_encode_data_island(&island, &packet, false, di_hsync_active);
     vblank_avi_infoframe_len = build_line_with_di(vblank_avi_infoframe, island.words, false, false);
 

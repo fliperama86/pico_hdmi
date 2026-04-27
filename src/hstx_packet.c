@@ -223,8 +223,8 @@ void hstx_packet_set_avi_infoframe(hstx_packet_t *packet, uint8_t vic, uint8_t p
     packet->header[1] = 0x02;
     packet->header[2] = 0x0D;
 
-    packet->subpacket[0][1] = 0x00;
-    packet->subpacket[0][2] = 0x08;
+    packet->subpacket[0][1] = 0x10;                     // A=1: active format information is valid.
+    packet->subpacket[0][2] = (vic == 4) ? 0x28 : 0x18; // 16:9 for 720p, 4:3 otherwise; R=8.
     packet->subpacket[0][3] = 0x00;
     packet->subpacket[0][4] = vic;
     packet->subpacket[0][5] = pixel_repetition & 0x0F;
