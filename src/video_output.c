@@ -29,6 +29,10 @@
 #define PICO_HDMI_LINE_BUFFER_ATTR
 #endif
 
+#ifndef PICO_HDMI_LEGACY_240P_AVI_INFOFRAME
+#define PICO_HDMI_LEGACY_240P_AVI_INFOFRAME 0
+#endif
+
 // ============================================================================
 // DVI/HSTX Constants
 // ============================================================================
@@ -738,7 +742,7 @@ void video_output_init(uint16_t width, uint16_t height)
 
     // VIC=1 for 640x480, VIC=4 for 720p60, VIC=0 for non-standard timings (e.g. 240p)
     uint8_t vic = (height == 480) ? 1 : (height == 720) ? 4 : 0;
-#ifdef VIDEO_MODE_320x240
+#if defined(VIDEO_MODE_320x240) && !PICO_HDMI_LEGACY_240P_AVI_INFOFRAME
     uint8_t pixel_repetition = 3;
 #else
     uint8_t pixel_repetition = 0;
