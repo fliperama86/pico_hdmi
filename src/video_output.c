@@ -170,20 +170,31 @@ static uint32_t vactive_di_len, vactive_di_null_len;
 #if PICO_HDMI_PRECOMPOSED_ACTIVE_LINES
 static uint32_t build_line_with_di(uint32_t *buf, const uint32_t *di_words, bool vsync, bool active);
 
-// Pre-composed active-line headers: composed OUTSIDE the scanline ISR (in
-// the background task via video_output_compose_service), so the ISR's HDMI
-// work shrinks to a pointer lookup -- the same workload as the pointer-only
-// DVI path that is stable under heavy Core 0 load. A stale entry falls back
-// to the static null-island header: one audio packet is repeated/lost, video
-// timing is untouched. In this mode all audio rides active lines and the
-// blanking lines use only static buffers.
+// Pre-composed active-line headers. The header content is STATIC (sync +
+// preamble + control + video preamble); only the 36 island words change per
+// line. Headers are built ONCE (first compose_service call); per line, the
+// scanline ISR pops a pre-ENCODED island from the di queue and patches it
+// into the entry it is about to post (~36 word copies, <1.5 us). This keeps
+// the audio schedule inside the ISR, so it is immune to ANY background-task
+// stall shorter than the di queue's cushion (~1 frame at 200 packets).
+//
+// The previous design composed entries ahead of the beam in the background
+// task: every per-frame background section longer than the ring's 2.5 ms
+// lead (frame init, RGB565 rebuild tail, overlay redraw, a 7 ms UART
+// printf) staled entries and dropped their already-dequeued audio packets
+// -- measured as +-60 Hz sidebands all over a pure sine (ST grew ~7
+// lines/frame). Do not resurrect ahead-of-beam composition for audio.
 static video_output_precomposed_line_t *compose_ring;
 static uint32_t compose_ring_entries;
-static volatile uint32_t active_line_global; // counted by the ISR
-static uint32_t compose_next_global;
-// Active lines that fell back to the static null island because their ring
-// entry was stale: each one is an already-dequeued audio packet silently
-// dropped. Must stay flat once the ring is warm.
+static bool compose_ring_built;
+static uint32_t active_line_global; // counted by the ISR (Core 1 only)
+// Offset of the 36 island words inside a built active line: front porch
+// (3 words) + island preamble (3) + the RAW command word (1).
+#define PRECOMPOSED_DI_OFFSET 7
+// Cached null-island payload for lines with no audio packet due.
+static const uint32_t *precomposed_null_di;
+// Active lines posted via the static fallback because the headers were not
+// built yet (startup only). Must not grow while running.
 volatile uint32_t video_output_precomposed_stale_count;
 
 // 16-bit active-data transfers: the pointer callback returns the native
@@ -200,41 +211,28 @@ void video_output_set_native_pixel_mode(bool enabled)
 
 void video_output_set_compose_ring(video_output_precomposed_line_t *ring, uint32_t entries)
 {
-    for (uint32_t i = 0; i < entries; i++) {
-        ring[i].tag = ~0u;
-    }
-    compose_next_global = 0;
     active_line_global = 0;
     compose_ring_entries = entries;
+    compose_ring_built = false;
     __compiler_memory_barrier();
     compose_ring = ring;
 }
 
 void video_output_compose_service(void)
 {
-    if (!compose_ring || dvi_mode) {
+    if (!compose_ring || compose_ring_built || dvi_mode) {
         return;
     }
-    const uint32_t lead = compose_ring_entries - 8;
-    // Cap the work per call: a full-ring refill in one burst (~5K word
-    // writes) hogs Core 1's bus slots right when the scanline ISR also needs
-    // them. The service is called continuously, so a small cap just spreads
-    // the same work out.
-    uint32_t budget = 16;
-    while (budget-- && (int32_t)(compose_next_global - active_line_global) < (int32_t)lead) {
-        video_output_precomposed_line_t *e = &compose_ring[compose_next_global % compose_ring_entries];
-        e->tag = ~0u;
-        __compiler_memory_barrier();
-        hstx_di_queue_tick();
-        const uint32_t *di = hstx_di_queue_get_audio_packet();
-        if (!di) {
-            di = hstx_get_null_data_island(false, true);
-        }
-        e->len = (uint16_t)build_line_with_di(e->buf, di, false, true);
-        __compiler_memory_barrier();
-        e->tag = compose_next_global;
-        compose_next_global++;
+    // One-time header build (requires the null island, i.e. audio config
+    // done -- this runs from the background task, after video_output init).
+    const uint32_t *null_di = hstx_get_null_data_island(false, DI_HSYNC_ACTIVE);
+    for (uint32_t i = 0; i < compose_ring_entries; i++) {
+        compose_ring[i].len = (uint16_t)build_line_with_di(compose_ring[i].buf, null_di, false, true);
+        compose_ring[i].tag = i;
     }
+    precomposed_null_di = null_di;
+    __compiler_memory_barrier();
+    compose_ring_built = true;
 }
 #endif // PICO_HDMI_PRECOMPOSED_ACTIVE_LINES
 
@@ -496,10 +494,21 @@ static inline void __scratch_x("")
         ch->transfer_count = count_of(vactive_line_dvi);
     } else {
 #if PICO_HDMI_PRECOMPOSED_ACTIVE_LINES
-        uint32_t g = active_line_global;
-        active_line_global = g + 1;
-        video_output_precomposed_line_t *e = compose_ring ? &compose_ring[g % compose_ring_entries] : NULL;
-        if (e && e->tag == g) {
+        if (compose_ring_built) {
+            uint32_t g = active_line_global++;
+            video_output_precomposed_line_t *e = &compose_ring[g % compose_ring_entries];
+            // Audio pacing lives HERE so it can never be starved by the
+            // background task: pop a pre-encoded island (or null/silence)
+            // and patch it into the static header about to be posted.
+            hstx_di_queue_tick();
+            const uint32_t *di = hstx_di_queue_get_audio_packet();
+            if (!di) {
+                di = precomposed_null_di;
+            }
+            uint32_t *dst = &e->buf[PRECOMPOSED_DI_OFFSET];
+            for (int i = 0; i < W_DATA_ISLAND; i++) {
+                dst[i] = di[i];
+            }
             ch->read_addr = (uintptr_t)e->buf;
             ch->transfer_count = e->len;
         } else {

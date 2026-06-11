@@ -11,9 +11,11 @@ static hstx_data_island_t di_ring_buffer[DI_RING_BUFFER_SIZE];
 static volatile uint32_t di_ring_head = 0;
 static volatile uint32_t di_ring_tail = 0;
 
-// Single pre-encoded silent audio packet (fixed B-frame flags).
+// Single pre-encoded silent audio packet (no B flag; see init).
 static hstx_data_island_t silence_packet;
 static bool di_hsync_active = DI_HSYNC_ACTIVE;
+// Underrun insertions of the silence packet (see get_audio_packet).
+volatile uint32_t hstx_di_queue_silence_count;
 
 // Audio timing state (default 48kHz, 525 lines for 480p)
 static uint32_t audio_sample_accum = 0; // Fixed-point accumulator
@@ -27,9 +29,12 @@ static uint32_t samples_per_line_fp = (DEFAULT_SAMPLES_PER_FRAME << 16) / 525;
 
 static void hstx_di_queue_build_silence_packet(void)
 {
+    // frame_count=4 (NOT 0): frame 0 would set the IEC block-start B flag,
+    // so every underrun insertion would reset the sink's channel-status block
+    // sync mid-stream.
     hstx_packet_t packet;
     audio_sample_t samples[4] = {0};
-    (void)hstx_packet_set_audio_samples(&packet, samples, 4, 0);
+    (void)hstx_packet_set_audio_samples(&packet, samples, 4, 4);
     hstx_encode_data_island(&silence_packet, &packet, false, di_hsync_active);
 }
 
@@ -37,6 +42,7 @@ void hstx_di_queue_init(void)
 {
     di_ring_head = 0;
     di_ring_tail = 0;
+    hstx_di_queue_silence_count = 0;
     audio_sample_accum = 0;
     hstx_di_queue_build_silence_packet();
 }
@@ -108,7 +114,10 @@ const uint32_t *__scratch_x("") hstx_di_queue_get_audio_packet(void)
             di_ring_tail = (di_ring_tail + 1) % DI_RING_BUFFER_SIZE;
             return words;
         }
-        // Queue is empty: return a pre-encoded silent packet to keep HDMI audio active.
+        // Queue is empty: return a pre-encoded silent packet to keep HDMI
+        // audio active. Every insertion stretches the real sample stream by
+        // 4 samples -- if the counter climbs, the producer is starving.
+        hstx_di_queue_silence_count++;
         return silence_packet.words;
     }
     return NULL;

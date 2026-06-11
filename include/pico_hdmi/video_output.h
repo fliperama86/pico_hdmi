@@ -190,11 +190,14 @@ void video_output_set_dvi_mode(bool enabled);
 
 /**
  * Pre-composed active-line support (compile with
- * PICO_HDMI_PRECOMPOSED_ACTIVE_LINES=1). Active-line headers (sync + data
- * island + video preamble) are composed outside the scanline ISR in
- * video_output_compose_service(); the ISR only swaps buffer pointers. All
- * audio rides the active lines (pace the data-island queue accordingly,
- * e.g. hstx_di_queue_set_samples_per_line_fp((samples_per_frame<<16)/active_lines)).
+ * PICO_HDMI_PRECOMPOSED_ACTIVE_LINES=1). Static active-line headers (sync +
+ * preamble + video preamble) are built ONCE by the first
+ * video_output_compose_service() call; per line, the scanline ISR pops a
+ * pre-encoded island from the di queue and patches its 36 words into the
+ * entry being posted (~1.5 us). Audio pacing therefore lives in the ISR and
+ * cannot be starved by background work. All audio rides the active lines
+ * (pace the queue accordingly, e.g.
+ * hstx_di_queue_set_samples_per_line_fp((samples_per_frame<<16)/active_lines)).
  */
 typedef struct {
     volatile uint32_t tag; // global active-line index this entry was composed for
@@ -207,10 +210,8 @@ void video_output_set_compose_ring(video_output_precomposed_line_t *ring, uint32
 void video_output_compose_service(void);
 
 /**
- * Active lines scanned out with the null-island fallback because their ring
- * entry was stale (each one is a dropped audio packet). A small burst around
- * startup/resync is normal; growth while running means the compose service
- * is being starved by long uninterrupted Core 1 work.
+ * Active lines posted via the static fallback before the headers were
+ * built (startup only). Must not grow while running.
  */
 extern volatile uint32_t video_output_precomposed_stale_count;
 
