@@ -224,6 +224,15 @@ extern volatile uint32_t video_output_precomposed_stale_count;
 void video_output_set_native_pixel_mode(bool enabled);
 
 /**
+ * Full HSTX + DMA restart from the top of a frame: recovers a desynced HSTX
+ * command stream (sink loses lock, line IRQs run far above 60 Hz frame
+ * pacing because the FIFO stops back-pressuring). Call from Core 1 thread
+ * context when frame pacing is detected as impossible.
+ */
+void video_output_force_resync(void);
+extern volatile uint32_t video_output_resync_count;
+
+/**
  * Core 1 entry point for video output.
  * This function does not return.
  */

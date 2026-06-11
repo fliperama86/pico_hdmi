@@ -857,3 +857,19 @@ void pico_hdmi_set_audio_sample_rate(uint32_t sample_rate)
 {
     configure_audio_packets(sample_rate);
 }
+
+volatile uint32_t video_output_resync_count;
+
+void video_output_force_resync(void)
+{
+    // Full HSTX + DMA restart from frame start. Recovers from a desynced
+    // HSTX command stream (one corrupted/mis-sized command word makes the
+    // expander misinterpret everything after it, permanently -- symptom:
+    // sink loses lock while scanlines "complete" at bus speed because the
+    // FIFO no longer back-pressures). Safe to call from Core 1 thread
+    // context; the scanline ISR is held off during the reset.
+    irq_set_enabled(DMA_IRQ_0, false);
+    hstx_resync();
+    irq_set_enabled(DMA_IRQ_0, true);
+    video_output_resync_count++;
+}
