@@ -233,6 +233,66 @@ void hstx_packet_set_avi_infoframe(hstx_packet_t *packet, uint8_t vic, uint8_t p
     compute_all_parity(packet);
 }
 
+// IEC 60958-3 channel status sequence, one bit per audio frame across the
+// 192-frame block: consumer, L-PCM, copy permitted (byte0=0x04), 48 kHz
+// sample frequency (byte3=0x02). All later bytes zero.
+static inline int channel_status_bit(int frame)
+{
+    static const uint8_t cs[5] = {0x04, 0x00, 0x00, 0x02, 0x00};
+    return frame < 40 ? (cs[frame >> 3] >> (frame & 7)) & 1 : 0;
+}
+
+int hstx_packet_set_audio_samples_cs(hstx_packet_t *packet, const audio_sample_t *samples, int num_samples,
+                                     int frame_count)
+{
+    hstx_packet_init(packet);
+    if (num_samples < 1)
+        num_samples = 1;
+    if (num_samples > 4)
+        num_samples = 4;
+
+    uint8_t sample_present = (1 << num_samples) - 1;
+    uint8_t b_flags = 0;
+
+    int temp_frame_count = frame_count;
+    for (int i = 0; i < num_samples; i++) {
+        if (temp_frame_count == 0)
+            b_flags |= (1 << i);
+        temp_frame_count = (temp_frame_count + 1) % 192;
+    }
+
+    packet->header[0] = 0x02;
+    packet->header[1] = sample_present;
+    packet->header[2] = b_flags << 4;
+    compute_header_parity(packet);
+
+    int fc = frame_count;
+    for (int i = 0; i < num_samples; i++) {
+        uint8_t *d = packet->subpacket[i];
+        int16_t left = samples[i].left;
+        int16_t right = samples[i].right;
+        int c = channel_status_bit(fc);
+        fc = (fc + 1) % 192;
+
+        d[0] = 0x00;
+        d[1] = left & 0xFF;
+        d[2] = (left >> 8) & 0xFF;
+        d[3] = 0x00;
+        d[4] = right & 0xFF;
+        d[5] = (right >> 8) & 0xFF;
+
+        // Parity covers the 24-bit sample plus V, U, C (V=U=0 here).
+        int p_left = (int)compute_parity3(d[1], d[2], 0) ^ c;
+        int p_right = (int)compute_parity3(d[4], d[5], 0) ^ c;
+
+        // Byte 6: VL UL CL PL VR UR CR PR (bits 0..7).
+        d[6] = (uint8_t)((c << 2) | (p_left << 3) | (c << 6) | (p_right << 7));
+        compute_subpacket_parity(packet, i);
+    }
+
+    return temp_frame_count;
+}
+
 int hstx_packet_set_audio_samples(hstx_packet_t *packet, const audio_sample_t *samples, int num_samples,
                                   int frame_count)
 {

@@ -25,6 +25,16 @@
 #define PICO_HDMI_RT_RUNTIME_MODE_ATTRS 0
 #endif
 
+#ifndef PICO_HDMI_LINE_BUFFER_IN_SCRATCH_Y
+#define PICO_HDMI_LINE_BUFFER_IN_SCRATCH_Y 0
+#endif
+
+#if PICO_HDMI_LINE_BUFFER_IN_SCRATCH_Y
+#define PICO_HDMI_LINE_BUFFER_ATTR __scratch_y("pico_hdmi_line_buffer")
+#else
+#define PICO_HDMI_LINE_BUFFER_ATTR
+#endif
+
 // ============================================================================
 // DVI/HSTX Constants
 // ============================================================================
@@ -242,7 +252,7 @@ volatile uint32_t video_frame_count = 0;
 static bool dvi_mode = false;
 
 // Max active pixels across all modes (1280 for 240p)
-static uint16_t line_buffer[1280] __attribute__((aligned(4)));
+static uint16_t PICO_HDMI_LINE_BUFFER_ATTR line_buffer[1280] __attribute__((aligned(4)));
 static uint32_t v_scanline = 2;
 static bool vactive_cmdlist_posted = false;
 static bool dma_pong = false;

@@ -41,6 +41,11 @@ void hstx_packet_set_audio_infoframe(hstx_packet_t *packet, uint32_t sample_rate
 void hstx_packet_set_avi_infoframe(hstx_packet_t *packet, uint8_t vic, uint8_t pixel_repetition);
 int hstx_packet_set_audio_samples(hstx_packet_t *packet, const audio_sample_t *samples, int num_samples,
                                   int frame_count);
+// As above, but with a proper IEC 60958 channel status bit sequence
+// (consumer L-PCM, 48 kHz) and parity covering the VUC bits. Strict
+// receivers (e.g. ones that re-encode audio) may require this.
+int hstx_packet_set_audio_samples_cs(hstx_packet_t *packet, const audio_sample_t *samples, int num_samples,
+                                     int frame_count);
 void hstx_packet_set_null(hstx_packet_t *packet);
 
 // ============================================================================
