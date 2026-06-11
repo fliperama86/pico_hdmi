@@ -161,6 +161,8 @@ static uint32_t vactive_line_dvi[] = {
     HSTX_CMD_RAW_REPEAT | MODE_H_BACK_PORCH,  SYNC_V1_H1, HSTX_CMD_TMDS | MODE_H_ACTIVE_PIXELS};
 
 static uint32_t vactive_di_ping[128], vactive_di_pong[128], vactive_di_null[128];
+static uint32_t vblank_di_ping[128], vblank_di_pong[128], vblank_di_null[128];
+static uint32_t vblank_di_len, vblank_di_null_len;
 static uint32_t vactive_di_len, vactive_di_null_len;
 
 #ifndef PICO_HDMI_PRECOMPOSED_ACTIVE_LINES
@@ -193,6 +195,8 @@ static uint32_t active_line_global; // counted by the ISR (Core 1 only)
 #define PRECOMPOSED_DI_OFFSET 7
 // Cached null-island payload for lines with no audio packet due.
 static const uint32_t *precomposed_null_di;
+// Length of the once-built blanking templates (vblank_di_ping/pong).
+static uint32_t precomposed_vblank_len;
 // Active lines posted via the static fallback because the headers were not
 // built yet (startup only). Must not grow while running.
 volatile uint32_t video_output_precomposed_stale_count;
@@ -230,14 +234,14 @@ void video_output_compose_service(void)
         compose_ring[i].len = (uint16_t)build_line_with_di(compose_ring[i].buf, null_di, false, true);
         compose_ring[i].tag = i;
     }
+    // Blanking templates for the ISR's island patching (non-vsync lines).
+    precomposed_vblank_len = build_line_with_di(vblank_di_ping, null_di, false, false);
+    (void)build_line_with_di(vblank_di_pong, null_di, false, false);
     precomposed_null_di = null_di;
     __compiler_memory_barrier();
     compose_ring_built = true;
 }
 #endif // PICO_HDMI_PRECOMPOSED_ACTIVE_LINES
-
-static uint32_t vblank_di_ping[128], vblank_di_pong[128], vblank_di_null[128];
-static uint32_t vblank_di_len, vblank_di_null_len;
 
 static uint32_t vblank_acr_vsync_on[64], vblank_acr_vsync_on_len;
 static uint32_t vblank_acr_vsync_off[64], vblank_acr_vsync_off_len;
@@ -497,10 +501,9 @@ static inline void __scratch_x("")
         if (compose_ring_built) {
             uint32_t g = active_line_global++;
             video_output_precomposed_line_t *e = &compose_ring[g % compose_ring_entries];
-            // Audio pacing lives HERE so it can never be starved by the
-            // background task: pop a pre-encoded island (or null/silence)
-            // and patch it into the static header about to be posted.
-            hstx_di_queue_tick();
+            // Pop a pre-encoded island (or null/silence) and patch it into
+            // the static header about to be posted. The schedule lives in
+            // this ISR, so the background task can never starve it.
             const uint32_t *di = hstx_di_queue_get_audio_packet();
             if (!di) {
                 di = precomposed_null_di;
@@ -550,10 +553,23 @@ static inline void __scratch_x("")
             ch->transfer_count = vblank_avi_infoframe_len;
         } else {
 #if PICO_HDMI_PRECOMPOSED_ACTIVE_LINES
-            // Audio rides the pre-composed active lines; blanking lines stay
-            // fully static so the ISR never composes anything.
-            ch->read_addr = (uintptr_t)vblank_di_null;
-            ch->transfer_count = vblank_di_null_len;
+            // Blanking lines carry their share of the audio schedule too
+            // (see the tick comment in dma_irq_handler): patch the island
+            // into a static ping/pong blanking template, same trick as the
+            // active lines.
+            const uint32_t *di = compose_ring_built ? hstx_di_queue_get_audio_packet() : NULL;
+            if (di) {
+                uint32_t *buf = dma_pong ? vblank_di_ping : vblank_di_pong;
+                uint32_t *dst = &buf[PRECOMPOSED_DI_OFFSET];
+                for (int i = 0; i < W_DATA_ISLAND; i++) {
+                    dst[i] = di[i];
+                }
+                ch->read_addr = (uintptr_t)buf;
+                ch->transfer_count = precomposed_vblank_len;
+            } else {
+                ch->read_addr = (uintptr_t)vblank_di_null;
+                ch->transfer_count = vblank_di_null_len;
+            }
 #else
             const uint32_t *di_words = hstx_di_queue_get_audio_packet();
             if (di_words) {
@@ -589,12 +605,14 @@ static void __scratch_x("") dma_irq_handler()
     dma_hw->intr = 1U << ch_num;
     dma_pong = !dma_pong;
 
-#if !PICO_HDMI_PRECOMPOSED_ACTIVE_LINES
-    // Advance audio/data-island scheduler exactly once per scanline (HDMI mode only)
+    // Advance audio/data-island scheduler exactly once per scanline (HDMI
+    // mode only). All 525 lines tick: audio packets must be spread across
+    // the whole frame INCLUDING blanking -- delivering only on active lines
+    // leaves a 45-line gap every frame, i.e. 60 Hz delivery modulation that
+    // sinks audibly resample around (+-60 Hz sidebands on a pure tone).
     if (!dvi_mode && !vactive_cmdlist_posted) {
         hstx_di_queue_tick();
     }
-#endif
 
     scanline_state_t state;
     get_scanline_state(v_scanline, &state);
