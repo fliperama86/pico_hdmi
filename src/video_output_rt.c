@@ -35,6 +35,17 @@
 #define PICO_HDMI_LINE_BUFFER_ATTR
 #endif
 
+// With precomposed active lines, the per-line DI builders are only invoked
+// from the background task (one-time header builds), so they need not --
+// and must not, for scratch-budget reasons -- occupy scratch sections.
+#if PICO_HDMI_PRECOMPOSED_ACTIVE_LINES
+#define DI_BUILDER_SECTION
+#define DI_BUILDER_SECTION_Y
+#else
+#define DI_BUILDER_SECTION __scratch_x("")
+#define DI_BUILDER_SECTION_Y __scratch_y("")
+#endif
+
 #ifndef PICO_HDMI_LEGACY_240P_AVI_INFOFRAME
 #define PICO_HDMI_LEGACY_240P_AVI_INFOFRAME 0
 #endif
@@ -518,10 +529,10 @@ static void hstx_resync(void)
 // Internal Helpers
 // ============================================================================
 
-static uint32_t __scratch_x("") build_line_with_di(uint32_t *buf, const uint32_t *di_words, bool vsync, bool active)
+static uint32_t DI_BUILDER_SECTION build_line_with_di(uint32_t *buf, const uint32_t *di_words, bool vsync, bool active)
     __attribute__((noinline, noclone));
 
-static uint32_t __scratch_x("") build_line_with_di(uint32_t *buf, const uint32_t *di_words, bool vsync, bool active)
+static uint32_t DI_BUILDER_SECTION build_line_with_di(uint32_t *buf, const uint32_t *di_words, bool vsync, bool active)
 {
     uint32_t *p = buf;
     uint32_t sync_h0;
@@ -624,8 +635,8 @@ static uint32_t __scratch_x("") build_line_with_di(uint32_t *buf, const uint32_t
 }
 
 #if PICO_HDMI_RT_RUNTIME_MODE_ATTRS
-static uint32_t __scratch_y("") build_line_with_di_backporch(uint32_t *buf, const uint32_t *di_words, bool vsync,
-                                                             bool active) __attribute__((noinline, noclone));
+static uint32_t DI_BUILDER_SECTION_Y build_line_with_di_backporch(uint32_t *buf, const uint32_t *di_words, bool vsync,
+                                                                  bool active) __attribute__((noinline, noclone));
 
 static uint32_t __scratch_y("")
     build_line_with_di_backporch(uint32_t *buf, const uint32_t *di_words, bool vsync, bool active)
@@ -841,8 +852,12 @@ static inline void __scratch_x("")
             ch->transfer_count = e->len;
             return;
         }
+        // Ring not built yet (startup / mode switch, a few ms): post the
+        // static null line; never call the line builders from the ISR.
         video_output_precomposed_stale_count++;
-#endif
+        ch->read_addr = (uintptr_t)vactive_di_null;
+        ch->transfer_count = vactive_di_null_len;
+#else
         uint32_t *buf = dma_pong ? vactive_di_ping : vactive_di_pong;
         const uint32_t *di_words = hstx_di_queue_get_audio_packet();
         if (di_words) {
@@ -853,6 +868,7 @@ static inline void __scratch_x("")
             ch->read_addr = (uintptr_t)vactive_di_null;
             ch->transfer_count = vactive_di_null_len;
         }
+#endif
     }
 }
 
@@ -895,7 +911,9 @@ static inline void __scratch_x("")
                 }
                 return;
             }
-#endif
+            ch->read_addr = (uintptr_t)vblank_di_null;
+            ch->transfer_count = vblank_di_null_len;
+#else
             const uint32_t *di_words = hstx_di_queue_get_audio_packet();
             if (di_words) {
                 uint32_t *buf = dma_pong ? vblank_di_ping : vblank_di_pong;
@@ -906,6 +924,7 @@ static inline void __scratch_x("")
                 ch->read_addr = (uintptr_t)vblank_di_null;
                 ch->transfer_count = vblank_di_null_len;
             }
+#endif
         }
     }
 }
