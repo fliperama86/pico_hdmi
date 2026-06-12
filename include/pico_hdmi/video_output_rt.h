@@ -1,6 +1,8 @@
 #ifndef VIDEO_OUTPUT_RT_H
 #define VIDEO_OUTPUT_RT_H
 
+#include "pico_hdmi/video_output_precomposed.h"
+
 #include <stdbool.h>
 #include <stdint.h>
 
