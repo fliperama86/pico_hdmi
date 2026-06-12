@@ -290,6 +290,55 @@ static video_output_vsync_cb_t vsync_callback = NULL;
 
 static uint32_t current_sample_rate = 48000;
 
+#if PICO_HDMI_PRECOMPOSED_ACTIVE_LINES
+// ============================================================================
+// Precomposed active lines (2.1): static per-mode headers; the ISR pops a
+// pre-encoded island from the di queue and patches it into the header being
+// posted. Pixel data comes from a pointer callback (zero-copy / app-prepared
+// rings); native 16-bit pixel mode is per-mode. Ported from video_output.c.
+// ============================================================================
+static video_output_scanline_ptr_cb_t scanline_ptr_callback = NULL;
+static const uint32_t *active_data_ptr = NULL;
+static bool native_pixel_mode = false;
+static uint32_t dma_ctrl32[2], dma_ctrl16[2];
+
+static video_output_precomposed_line_t *compose_ring;
+static uint32_t compose_ring_entries;
+static volatile bool compose_ring_built;
+static uint32_t active_line_global;
+static uint32_t precomposed_di_offset;
+static uint32_t precomposed_di_words;
+static uint32_t precomposed_vblank_di_offset;
+static const uint32_t *precomposed_null_di;
+static uint32_t precomposed_vblank_len;
+volatile uint32_t video_output_precomposed_stale_count;
+
+void video_output_set_scanline_pointer_callback(video_output_scanline_ptr_cb_t cb)
+{
+    scanline_ptr_callback = cb;
+}
+
+void video_output_set_native_pixel_mode(bool enabled)
+{
+    native_pixel_mode = enabled;
+}
+
+void video_output_set_compose_ring(video_output_precomposed_line_t *ring, uint32_t entries)
+{
+    active_line_global = 0;
+    compose_ring_entries = entries;
+    compose_ring_built = false;
+    __compiler_memory_barrier();
+    compose_ring = ring;
+}
+
+void video_output_force_resync(void)
+{
+    video_output_request_resync();
+}
+volatile uint32_t video_output_resync_count;
+#endif // PICO_HDMI_PRECOMPOSED_ACTIVE_LINES
+
 static inline bool data_island_hsync_active(void)
 {
 #if PICO_HDMI_RT_RUNTIME_MODE_ATTRS
@@ -436,6 +485,14 @@ static void hstx_resync(void)
 
     // 6. Configure DMA PING to start from beginning of frame (Line 0)
     dma_channel_hw_t *ch_ping = &dma_hw->ch[DMACH_PING];
+#if PICO_HDMI_PRECOMPOSED_ACTIVE_LINES
+    if (native_pixel_mode && dma_ctrl32[DMACH_PING]) {
+        // A resync can interrupt mid-line; restore 32-bit command transfers.
+        dma_hw->ch[DMACH_PING].al1_ctrl = dma_ctrl32[DMACH_PING];
+        dma_hw->ch[DMACH_PONG].al1_ctrl = dma_ctrl32[DMACH_PONG];
+    }
+    video_output_resync_count++;
+#endif
     ch_ping->read_addr = (uintptr_t)vblank_line_vsync_off;
     ch_ping->transfer_count = 9;
 
@@ -653,6 +710,63 @@ static inline void __scratch_x("") get_scanline_state(uint32_t v_scanline, scanl
     }
 }
 
+#if PICO_HDMI_PRECOMPOSED_ACTIVE_LINES
+void video_output_compose_service(void)
+{
+    if (!compose_ring || compose_ring_built || dvi_mode) {
+        return;
+    }
+    const uint32_t *null_di = hstx_get_null_data_island(false, data_island_hsync_active());
+
+    // Build entry 0 twice (null island, then a marker island) and diff to
+    // discover the island patch offset and width for the ACTIVE mode --
+    // robust against per-mode line layouts (in-hsync vs back-porch DI).
+    static uint32_t marker[40];
+    for (uint32_t i = 0; i < 40; i++) {
+        marker[i] = 0xA5A50000u | i;
+    }
+    uint32_t len_null = BUILD_LINE_WITH_DI(compose_ring[0].buf, null_di, false, true);
+    static uint32_t probe[sizeof(compose_ring[0].buf) / sizeof(uint32_t)];
+    uint32_t len_probe = BUILD_LINE_WITH_DI(probe, marker, false, true);
+    (void)len_probe;
+    uint32_t first = 0, last = 0;
+    for (uint32_t i = 0; i < len_null; i++) {
+        if (compose_ring[0].buf[i] != probe[i]) {
+            if (!first) {
+                first = i;
+            }
+            last = i;
+        }
+    }
+    precomposed_di_offset = first;
+    precomposed_di_words = last - first + 1;
+
+    compose_ring[0].len = (uint16_t)len_null;
+    compose_ring[0].tag = 0;
+    for (uint32_t i = 1; i < compose_ring_entries; i++) {
+        compose_ring[i].len = (uint16_t)BUILD_LINE_WITH_DI(compose_ring[i].buf, null_di, false, true);
+        compose_ring[i].tag = i;
+    }
+    // Blanking patch templates (non-vsync lines) with their own probed
+    // offset -- the blanking layout differs from the active layout in
+    // back-porch DI modes.
+    precomposed_vblank_len = BUILD_LINE_WITH_DI(vblank_di_ping, null_di, false, false);
+    (void)BUILD_LINE_WITH_DI(probe, marker, false, false);
+    first = 0;
+    for (uint32_t i = 0; i < precomposed_vblank_len; i++) {
+        if (vblank_di_ping[i] != probe[i]) {
+            first = i;
+            break;
+        }
+    }
+    precomposed_vblank_di_offset = first;
+    (void)BUILD_LINE_WITH_DI(vblank_di_pong, null_di, false, false);
+    precomposed_null_di = null_di;
+    __compiler_memory_barrier();
+    compose_ring_built = true;
+}
+#endif // PICO_HDMI_PRECOMPOSED_ACTIVE_LINES
+
 static inline void __scratch_x("") video_output_handle_vsync(dma_channel_hw_t *ch, uint32_t v_scanline)
 {
     if (dvi_mode) {
@@ -685,20 +799,50 @@ static inline void __scratch_x("") video_output_handle_vsync(dma_channel_hw_t *c
 static inline void __scratch_x("")
     video_output_handle_active_start(dma_channel_hw_t *ch, uint32_t v_scanline, uint32_t active_line, bool dma_pong)
 {
-    uint32_t *dst32 = (uint32_t *)line_buffer;
-
-    if (scanline_callback) {
-        scanline_callback(v_scanline, active_line, dst32);
-    } else {
-        for (uint32_t i = 0; i < rt_h_active_pixels / 2; i++) {
-            dst32[i] = 0;
+#if PICO_HDMI_PRECOMPOSED_ACTIVE_LINES
+    if (scanline_ptr_callback) {
+        active_data_ptr = scanline_ptr_callback(v_scanline, active_line);
+    } else
+#endif
+    {
+        uint32_t *dst32 = (uint32_t *)line_buffer;
+        if (scanline_callback) {
+            scanline_callback(v_scanline, active_line, dst32);
+        } else {
+            for (uint32_t i = 0; i < rt_h_active_pixels / 2; i++) {
+                dst32[i] = 0;
+            }
         }
+#if PICO_HDMI_PRECOMPOSED_ACTIVE_LINES
+        active_data_ptr = (const uint32_t *)line_buffer;
+#endif
     }
 
     if (dvi_mode) {
         ch->read_addr = (uintptr_t)vactive_line_dvi;
         ch->transfer_count = 9;
     } else {
+#if PICO_HDMI_PRECOMPOSED_ACTIVE_LINES
+        if (compose_ring_built) {
+            uint32_t g = active_line_global++;
+            video_output_precomposed_line_t *e = &compose_ring[g % compose_ring_entries];
+            // Pop a pre-encoded island (or null/silence) and patch it into
+            // the static header about to be posted; the audio schedule lives
+            // here and cannot be starved by background work.
+            const uint32_t *di = hstx_di_queue_get_audio_packet();
+            if (!di) {
+                di = precomposed_null_di;
+            }
+            uint32_t *dst = &e->buf[precomposed_di_offset];
+            for (uint32_t i = 0; i < precomposed_di_words; i++) {
+                dst[i] = di[i];
+            }
+            ch->read_addr = (uintptr_t)e->buf;
+            ch->transfer_count = e->len;
+            return;
+        }
+        video_output_precomposed_stale_count++;
+#endif
         uint32_t *buf = dma_pong ? vactive_di_ping : vactive_di_pong;
         const uint32_t *di_words = hstx_di_queue_get_audio_packet();
         if (di_words) {
@@ -734,6 +878,24 @@ static inline void __scratch_x("")
             ch->read_addr = (uintptr_t)vblank_avi_infoframe;
             ch->transfer_count = vblank_avi_infoframe_len;
         } else {
+#if PICO_HDMI_PRECOMPOSED_ACTIVE_LINES
+            if (compose_ring_built) {
+                const uint32_t *di = hstx_di_queue_get_audio_packet();
+                if (di) {
+                    uint32_t *buf = dma_pong ? vblank_di_ping : vblank_di_pong;
+                    uint32_t *dst = &buf[precomposed_vblank_di_offset];
+                    for (uint32_t i = 0; i < precomposed_di_words; i++) {
+                        dst[i] = di[i];
+                    }
+                    ch->read_addr = (uintptr_t)buf;
+                    ch->transfer_count = precomposed_vblank_len;
+                } else {
+                    ch->read_addr = (uintptr_t)vblank_di_null;
+                    ch->transfer_count = vblank_di_null_len;
+                }
+                return;
+            }
+#endif
             const uint32_t *di_words = hstx_di_queue_get_audio_packet();
             if (di_words) {
                 uint32_t *buf = dma_pong ? vblank_di_ping : vblank_di_pong;
@@ -750,7 +912,13 @@ static inline void __scratch_x("")
 
 static inline void __scratch_x("") video_output_handle_active_data(dma_channel_hw_t *ch)
 {
+#if PICO_HDMI_PRECOMPOSED_ACTIVE_LINES
+    ch->read_addr = (uintptr_t)active_data_ptr;
+#else
     ch->read_addr = (uintptr_t)line_buffer;
+#endif
+    // 32-bit mode: h_active/2 words of pre-expanded pixel pairs. Native
+    // 16-bit mode: the same count as halfword transfers, bus-replicated.
     ch->transfer_count = (rt_h_active_pixels * sizeof(uint16_t)) / sizeof(uint32_t);
 }
 
@@ -772,6 +940,13 @@ static void __scratch_x("") dma_irq_handler()
 
     scanline_state_t state;
     get_scanline_state(v_scanline, &state);
+
+#if PICO_HDMI_PRECOMPOSED_ACTIVE_LINES
+    if (native_pixel_mode) {
+        bool posting_active_data = state.active_video && vactive_cmdlist_posted;
+        ch->al1_ctrl = posting_active_data ? dma_ctrl16[ch_num] : dma_ctrl32[ch_num];
+    }
+#endif
 
     if (state.vsync_active) {
         video_output_handle_vsync(ch, v_scanline);
@@ -914,6 +1089,13 @@ static void build_all_command_lists(const video_mode_t *mode)
 
 static void apply_mode(const video_mode_t *mode)
 {
+#if PICO_HDMI_PRECOMPOSED_ACTIVE_LINES
+    // Headers are mode-specific: invalidate so the background task rebuilds
+    // them (and re-probes DI offsets) for the new mode. The ISR falls back
+    // to per-line builds until then.
+    compose_ring_built = false;
+    __compiler_memory_barrier();
+#endif
     // 1. Disable DMA IRQ to prevent ISR firing with partial state
     irq_set_enabled(DMA_IRQ_0, false);
 
@@ -1051,6 +1233,16 @@ void video_output_core1_run(void)
     channel_config_set_chain_to(&c, DMACH_PING);
     channel_config_set_dreq(&c, DREQ_HSTX);
     dma_channel_configure(DMACH_PONG, &c, &hstx_fifo_hw->fifo, vblank_line_vsync_off, 9, false);
+
+#if PICO_HDMI_PRECOMPOSED_ACTIVE_LINES
+    for (int i = 0; i < 2; i++) {
+        uint32_t chn = (i == 0) ? DMACH_PING : DMACH_PONG;
+        uint32_t ctrl = dma_hw->ch[chn].al1_ctrl;
+        dma_ctrl32[chn] = ctrl;
+        dma_ctrl16[chn] =
+            (ctrl & ~DMA_CH0_CTRL_TRIG_DATA_SIZE_BITS) | ((uint32_t)DMA_SIZE_16 << DMA_CH0_CTRL_TRIG_DATA_SIZE_LSB);
+    }
+#endif
 
     dma_hw->ints0 = (1U << DMACH_PING) | (1U << DMACH_PONG);
     dma_hw->inte0 = (1U << DMACH_PING) | (1U << DMACH_PONG);
