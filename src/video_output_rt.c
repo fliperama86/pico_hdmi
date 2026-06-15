@@ -51,6 +51,13 @@
 #define PICO_HDMI_LEGACY_240P_AVI_INFOFRAME 0
 #endif
 
+// HSTX clock divider for the 480p mode descriptor. Default 1 (stock 126 MHz
+// sys_clk -> 25.2 MHz pixel). A consumer overclocking 480p (e.g. 252 MHz for
+// scanline-IRQ headroom) sets this to 2 to keep the pixel clock unchanged.
+#ifndef PICO_HDMI_480P_HSTX_CLK_DIV
+#define PICO_HDMI_480P_HSTX_CLK_DIV 1
+#endif
+
 #ifndef PICO_HDMI_ALIGN_DI_BUFFERS
 #define PICO_HDMI_ALIGN_DI_BUFFERS 0
 #endif
@@ -215,7 +222,11 @@ const video_mode_t video_mode_480_p = {
     .v_active_lines = 480,
     .h_total_pixels = 800,
     .v_total_lines = 525,
-    .hstx_clk_div = 1,
+    // Pixel = sys_clk / (hstx_clk_div * hstx_csr_clkdiv); 1*5 -> 25.2 MHz at the
+    // stock 126 MHz. A consumer overclocking 480p (e.g. 252 MHz for scanline-IRQ
+    // headroom) defines PICO_HDMI_480P_HSTX_CLK_DIV=2 to keep pixel/signal
+    // identical (clk_hstx stays 126 MHz; only clk_sys speeds up).
+    .hstx_clk_div = PICO_HDMI_480P_HSTX_CLK_DIV,
     .hstx_csr_clkdiv = 5,
     .sync_positive = false,
     .data_island_in_hsync = true,
