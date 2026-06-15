@@ -16,6 +16,7 @@
 #include "hardware/structs/hstx_ctrl.h"
 #include "hardware/structs/hstx_fifo.h"
 #include "hardware/sync.h"
+#include "hardware/timer.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -709,19 +710,123 @@ static inline void __scratch_x("") get_scanline_state(uint32_t v_scanline, scanl
     state->front_porch = (v_scanline < rt_v_front_porch);
     state->back_porch = (v_scanline >= rt_v_front_porch + rt_v_sync_width &&
                          v_scanline < rt_v_front_porch + rt_v_sync_width + rt_v_back_porch);
-    // Classify active by the SAME boundary the active_line formula uses:
-    // when genlock stretches v_total beyond the nominal porch sum, the extra
-    // lines (between back porch and active) must be BLANKING — classifying
-    // them active yields a negative/huge active_line and garbage scanout.
-    state->active_video = (v_scanline >= (uint32_t)(rt_v_total_lines - rt_v_active_lines));
+    // Active video is pinned directly after the back porch so the
+    // vsync-to-active distance NEVER depends on v_total: genlock vtotal
+    // steps land at the BOTTOM of the frame (extra blanking before the
+    // front porch) instead of shifting the picture vertically.
+    const uint32_t blank_head = (uint32_t)rt_v_front_porch + rt_v_sync_width + rt_v_back_porch;
+    state->active_video = (v_scanline >= blank_head) && (v_scanline < blank_head + rt_v_active_lines);
 
-    state->send_acr = (v_scanline >= (rt_v_front_porch + rt_v_sync_width) &&
-                       v_scanline < (rt_v_total_lines - rt_v_active_lines) && (v_scanline % 4 == 0));
+    state->send_acr =
+        (v_scanline >= (rt_v_front_porch + rt_v_sync_width) && v_scanline < blank_head && (v_scanline % 4 == 0));
 
     if (state->active_video) {
-        state->active_line = v_scanline - (rt_v_total_lines - rt_v_active_lines);
+        state->active_line = v_scanline - blank_head;
     } else {
         state->active_line = 0;
+    }
+}
+
+// ============================================================================
+// Elastic blanking: sub-line frame-period trim for genlock. Each blanking
+// template ends in one large RAW_REPEAT (back porch + active, >1000 px);
+// adding N pixels to those words stretches every blanking line by N pixel
+// clocks. Granularity ~40 lines x 13.4 ns = ~0.5 us/frame per pixel -- 40x
+// finer than a +-1 vtotal step, and invisible to sink line PLLs (<<1% of a
+// line). vtotal dither steps (22 us) visibly disturb some sinks.
+// ============================================================================
+// ============================================================================
+// Output perf probe: per-IRQ HSTX FIFO level minimum + max inter-IRQ gap.
+// A FIFO dip toward empty or an IRQ gap spike is the objective signature of
+// an output microburp (the thing sinks render as a split-second jolt).
+// Cost: ~10 cycles per IRQ. Read-and-rearm via video_output_perf_probe_read().
+// ============================================================================
+static volatile uint32_t probe_fifo_min = 0xFFFFFFFFU;
+static volatile uint32_t probe_irq_gap_max;
+static uint32_t probe_last_irq_ts;
+
+void video_output_perf_probe_read(uint32_t *fifo_min, uint32_t *irq_gap_max_us)
+{
+    *fifo_min = probe_fifo_min;
+    *irq_gap_max_us = probe_irq_gap_max;
+    probe_fifo_min = 0xFFFFFFFFU;
+    probe_irq_gap_max = 0;
+}
+
+#define HTRIM_MAX_SLOTS 16
+#define HTRIM_MIN_BIG_REPEAT 1200
+#define HTRIM_MAX_BIG_REPEAT 1600
+#define HTRIM_LIMIT_PX 30
+static uint32_t *htrim_word[HTRIM_MAX_SLOTS];
+static uint16_t htrim_base[HTRIM_MAX_SLOTS];
+static uint8_t htrim_slots;
+static int16_t htrim_px;
+
+static void htrim_register(uint32_t *buf, uint32_t len)
+{
+    for (uint32_t i = 0; i < len && htrim_slots < HTRIM_MAX_SLOTS; i++) {
+        const uint32_t count = buf[i] & 0xFFFU;
+        if ((buf[i] >> 12) == 0x1 && count >= HTRIM_MIN_BIG_REPEAT && count <= HTRIM_MAX_BIG_REPEAT) {
+            htrim_word[htrim_slots] = &buf[i];
+            htrim_base[htrim_slots] = (uint16_t)(buf[i] & 0xFFFU);
+            htrim_slots++;
+        }
+    }
+}
+
+static void htrim_register_all(void)
+{
+    htrim_slots = 0;
+    htrim_px = 0;
+    htrim_register(vblank_line_vsync_off, 9);
+    htrim_register(vblank_line_vsync_on, 9);
+    htrim_register(vblank_acr_vsync_on, vblank_acr_vsync_on_len);
+    htrim_register(vblank_acr_vsync_off, vblank_acr_vsync_off_len);
+    htrim_register(vblank_infoframe_vsync_on, vblank_infoframe_vsync_on_len);
+    htrim_register(vblank_infoframe_vsync_off, vblank_infoframe_vsync_off_len);
+    htrim_register(vblank_avi_infoframe, vblank_avi_infoframe_len);
+    htrim_register(genlock_acr_vsync_on, genlock_acr_vsync_on_len);
+    htrim_register(genlock_acr_vsync_off, genlock_acr_vsync_off_len);
+#if PICO_HDMI_PRECOMPOSED_ACTIVE_LINES
+    // The DI vblank templates are persistent in precomposed mode (the ISR
+    // patches island words in place, never the tail repeat) and MUST be
+    // trimmed too: trimming only the non-DI lines imposes a line-to-line
+    // H-period sawtooth inside every vblank (1650 vs 1650+trim px), which
+    // sink H-PLLs visibly track once |trim| exceeds ~14 px (bench-observed).
+    // Uniform trim removes the alternation and triples the authority.
+    // False positives are impossible: TERC4 payload words always carry
+    // high bits (3x10-bit lanes), so they can never match a bare
+    // RAW_REPEAT command in the 1200-1600 px window.
+    htrim_register(vblank_di_ping, precomposed_vblank_len);
+    htrim_register(vblank_di_pong, precomposed_vblank_len);
+    htrim_register(vblank_di_null, vblank_di_null_len);
+#endif
+}
+
+int video_output_get_vblank_htrim_slots(void)
+{
+    return (int)htrim_slots;
+}
+
+int video_output_get_vblank_htrim_px(void)
+{
+    return (int)htrim_px;
+}
+
+// Trim every blanking line by `px` pixel clocks (clamped). Safe to call from
+// the vsync callback: single aligned word writes, picked up by the lines
+// posted later in the same frame.
+void video_output_set_vblank_htrim_px(int px)
+{
+    if (px > HTRIM_LIMIT_PX)
+        px = HTRIM_LIMIT_PX;
+    if (px < -HTRIM_LIMIT_PX)
+        px = -HTRIM_LIMIT_PX;
+    if ((int16_t)px == htrim_px)
+        return;
+    htrim_px = (int16_t)px;
+    for (uint32_t i = 0; i < htrim_slots; i++) {
+        *htrim_word[i] = (0x1U << 12) | (uint32_t)(htrim_base[i] + px);
     }
 }
 
@@ -778,6 +883,7 @@ void video_output_compose_service(void)
     (void)BUILD_LINE_WITH_DI(vblank_di_pong, null_di, false, false);
     precomposed_null_di = null_di;
     __compiler_memory_barrier();
+    htrim_register_all();
     compose_ring_built = true;
 }
 #endif // PICO_HDMI_PRECOMPOSED_ACTIVE_LINES
@@ -951,6 +1057,18 @@ static inline void __scratch_x("") video_output_handle_active_data(dma_channel_h
 
 static void __scratch_x("") dma_irq_handler()
 {
+    {
+        const uint32_t now = timer_hw->timerawl;
+        const uint32_t gap = now - probe_last_irq_ts;
+        probe_last_irq_ts = now;
+        if (gap > probe_irq_gap_max && gap < 1000000U) {
+            probe_irq_gap_max = gap;
+        }
+        const uint32_t lvl = (hstx_fifo_hw->stat & HSTX_FIFO_STAT_LEVEL_BITS) >> HSTX_FIFO_STAT_LEVEL_LSB;
+        if (lvl < probe_fifo_min) {
+            probe_fifo_min = lvl;
+        }
+    }
     uint32_t ch_num = dma_pong ? DMACH_PONG : DMACH_PING;
     dma_channel_hw_t *ch = &dma_hw->ch[ch_num];
     dma_hw->intr = 1U << ch_num;

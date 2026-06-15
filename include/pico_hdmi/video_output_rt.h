@@ -132,4 +132,16 @@ void video_output_update_acr(uint32_t pixel_clock_hz);
  */
 void video_output_request_resync(void);
 
+// Genlock fine trim: stretch/shrink every blanking line by `px` pixel clocks
+// (~0.5 us/frame per px across a full vblank). Sub-line alternative to
+// vtotal dithering, which steps the frame period by a whole line (~22 us)
+// and visibly disturbs some sinks. Clamped to +-60 px.
+void video_output_set_vblank_htrim_px(int px);
+int video_output_get_vblank_htrim_slots(void); // 0 = registration found nothing
+int video_output_get_vblank_htrim_px(void);    // current applied (clamped) trim
+
+// Perf probe: returns and re-arms the windowed minimum HSTX FIFO level and
+// the maximum inter-IRQ gap (us) observed since the previous call.
+void video_output_perf_probe_read(uint32_t *fifo_min, uint32_t *irq_gap_max_us);
+
 #endif // VIDEO_OUTPUT_RT_H
