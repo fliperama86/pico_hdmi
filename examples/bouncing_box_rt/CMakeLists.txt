@@ -31,6 +31,13 @@ add_executable(bouncing_box_rt
 target_compile_definitions(pico_hdmi PRIVATE VIDEO_MODE_1280x720)
 target_compile_definitions(bouncing_box_rt PRIVATE VIDEO_MODE_1280x720)
 
+# 720p overclocks sys_clk to 372 MHz. At that speed the QMI flash read timing
+# (set by boot stage2 for the boot clock) no longer samples correctly, so XIP
+# instruction fetches corrupt and the core hard-faults. Execute from RAM: flash
+# is read only once at the safe boot clock, never at 372 MHz. Flash-chip-
+# independent; the robust fix for any 720p build.
+pico_set_binary_type(bouncing_box_rt copy_to_ram)
+
 target_link_libraries(bouncing_box_rt
     pico_stdlib
     pico_multicore

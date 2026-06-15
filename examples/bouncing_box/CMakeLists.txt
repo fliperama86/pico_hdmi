@@ -27,6 +27,11 @@ option(BOUNCING_BOX_720P "Build bouncing_box in 1280x720 mode (requires overcloc
 if (BOUNCING_BOX_720P)
     target_compile_definitions(bouncing_box PRIVATE VIDEO_MODE_1280x720)
     target_compile_definitions(pico_hdmi PRIVATE VIDEO_MODE_1280x720)
+    # 720p overclocks sys_clk to 372 MHz, at which XIP flash reads corrupt (the
+    # boot-clock QMI timing no longer samples correctly) and the core hard-faults.
+    # Execute from RAM so flash is only read at the safe boot clock. Robust and
+    # flash-chip-independent. (480p stays the default flash/XIP build.)
+    pico_set_binary_type(bouncing_box copy_to_ram)
 endif()
 
 option(BOUNCING_BOX_DVI_ONLY "Build bouncing_box without HDMI Data Islands/audio" OFF)
