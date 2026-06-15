@@ -709,7 +709,11 @@ static inline void __scratch_x("") get_scanline_state(uint32_t v_scanline, scanl
     state->front_porch = (v_scanline < rt_v_front_porch);
     state->back_porch = (v_scanline >= rt_v_front_porch + rt_v_sync_width &&
                          v_scanline < rt_v_front_porch + rt_v_sync_width + rt_v_back_porch);
-    state->active_video = (!state->vsync_active && !state->front_porch && !state->back_porch);
+    // Classify active by the SAME boundary the active_line formula uses:
+    // when genlock stretches v_total beyond the nominal porch sum, the extra
+    // lines (between back porch and active) must be BLANKING — classifying
+    // them active yields a negative/huge active_line and garbage scanout.
+    state->active_video = (v_scanline >= (uint32_t)(rt_v_total_lines - rt_v_active_lines));
 
     state->send_acr = (v_scanline >= (rt_v_front_porch + rt_v_sync_width) &&
                        v_scanline < (rt_v_total_lines - rt_v_active_lines) && (v_scanline % 4 == 0));
