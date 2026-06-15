@@ -285,6 +285,11 @@ static uint16_t rt_v_sync_width;
 static uint16_t rt_v_back_porch;
 static uint16_t rt_v_active_lines;
 uint16_t rt_v_total_lines;
+// Frame-constant vertical region boundaries, precomputed in init_rt_from_mode()
+// so get_scanline_state() doesn't re-add them on every scanline IRQ.
+static uint16_t rt_vsync_end;  // front_porch + sync_width
+static uint16_t rt_blank_head; // front_porch + sync_width + back_porch (= active start)
+static uint32_t rt_active_end; // blank_head + active_lines
 static uint16_t rt_sync_after_di;
 #if PICO_HDMI_RT_RUNTIME_MODE_ATTRS
 static bool rt_di_in_hsync;
@@ -717,19 +722,18 @@ typedef struct {
 
 static inline void __scratch_x("") get_scanline_state(uint32_t v_scanline, scanline_state_t *state)
 {
-    state->vsync_active = (v_scanline >= rt_v_front_porch && v_scanline < (rt_v_front_porch + rt_v_sync_width));
+    // Boundaries (rt_vsync_end / rt_blank_head / rt_active_end) are precomputed
+    // once per mode in init_rt_from_mode() rather than re-summed every line.
+    // Active video is pinned directly after the back porch so the vsync-to-active
+    // distance NEVER depends on v_total: genlock vtotal steps land at the BOTTOM
+    // of the frame (extra blanking before the front porch), not shifting the picture.
+    const uint32_t blank_head = rt_blank_head;
+    state->vsync_active = (v_scanline >= rt_v_front_porch && v_scanline < rt_vsync_end);
     state->front_porch = (v_scanline < rt_v_front_porch);
-    state->back_porch = (v_scanline >= rt_v_front_porch + rt_v_sync_width &&
-                         v_scanline < rt_v_front_porch + rt_v_sync_width + rt_v_back_porch);
-    // Active video is pinned directly after the back porch so the
-    // vsync-to-active distance NEVER depends on v_total: genlock vtotal
-    // steps land at the BOTTOM of the frame (extra blanking before the
-    // front porch) instead of shifting the picture vertically.
-    const uint32_t blank_head = (uint32_t)rt_v_front_porch + rt_v_sync_width + rt_v_back_porch;
-    state->active_video = (v_scanline >= blank_head) && (v_scanline < blank_head + rt_v_active_lines);
+    state->back_porch = (v_scanline >= rt_vsync_end && v_scanline < blank_head);
+    state->active_video = (v_scanline >= blank_head && v_scanline < rt_active_end);
 
-    state->send_acr =
-        (v_scanline >= (rt_v_front_porch + rt_v_sync_width) && v_scanline < blank_head && (v_scanline % 4 == 0));
+    state->send_acr = (v_scanline >= rt_vsync_end && v_scanline < blank_head && (v_scanline % 4 == 0));
 
     if (state->active_video) {
         state->active_line = v_scanline - blank_head;
@@ -750,18 +754,31 @@ static inline void __scratch_x("") get_scanline_state(uint32_t v_scanline, scanl
 // Output perf probe: per-IRQ HSTX FIFO level minimum + max inter-IRQ gap.
 // A FIFO dip toward empty or an IRQ gap spike is the objective signature of
 // an output microburp (the thing sinks render as a split-second jolt).
-// Cost: ~10 cycles per IRQ. Read-and-rearm via video_output_perf_probe_read().
+// DIAGNOSTIC ONLY: two APB peripheral reads per scanline IRQ (timer + FIFO),
+// which stall the core. Off by default to keep the per-line ISR lean; define
+// PICO_HDMI_PERF_PROBE=1 to re-enable the FIFO/gap telemetry.
 // ============================================================================
+#ifndef PICO_HDMI_PERF_PROBE
+#define PICO_HDMI_PERF_PROBE 0
+#endif
+
+#if PICO_HDMI_PERF_PROBE
 static volatile uint32_t probe_fifo_min = 0xFFFFFFFFU;
 static volatile uint32_t probe_irq_gap_max;
 static uint32_t probe_last_irq_ts;
+#endif
 
 void video_output_perf_probe_read(uint32_t *fifo_min, uint32_t *irq_gap_max_us)
 {
+#if PICO_HDMI_PERF_PROBE
     *fifo_min = probe_fifo_min;
     *irq_gap_max_us = probe_irq_gap_max;
     probe_fifo_min = 0xFFFFFFFFU;
     probe_irq_gap_max = 0;
+#else
+    *fifo_min = 0;
+    *irq_gap_max_us = 0;
+#endif
 }
 
 #define HTRIM_MAX_SLOTS 16
@@ -1068,6 +1085,7 @@ static inline void __scratch_x("") video_output_handle_active_data(dma_channel_h
 
 static void __scratch_x("") dma_irq_handler()
 {
+#if PICO_HDMI_PERF_PROBE
     {
         const uint32_t now = timer_hw->timerawl;
         const uint32_t gap = now - probe_last_irq_ts;
@@ -1080,6 +1098,7 @@ static void __scratch_x("") dma_irq_handler()
             probe_fifo_min = lvl;
         }
     }
+#endif
     uint32_t ch_num = dma_pong ? DMACH_PONG : DMACH_PING;
     dma_channel_hw_t *ch = &dma_hw->ch[ch_num];
     dma_hw->intr = 1U << ch_num;
@@ -1111,8 +1130,12 @@ static void __scratch_x("") dma_irq_handler()
     } else {
         video_output_handle_blanking(ch, v_scanline, state.send_acr, dma_pong);
     }
-    if (!vactive_cmdlist_posted)
-        v_scanline = (v_scanline + 1) % rt_v_total_lines;
+    if (!vactive_cmdlist_posted) {
+        // compare-and-reset instead of % (rt_v_total_lines is a non-power-of-2
+        // runtime value -> real udiv; the wrap test is ~10-18 cyc cheaper/line).
+        uint32_t next_scanline = v_scanline + 1U;
+        v_scanline = (next_scanline >= rt_v_total_lines) ? 0U : next_scanline;
+    }
 }
 
 // ============================================================================
@@ -1203,6 +1226,9 @@ static void init_rt_from_mode(const video_mode_t *mode)
     rt_v_back_porch = mode->v_back_porch;
     rt_v_active_lines = mode->v_active_lines;
     rt_v_total_lines = mode->v_total_lines;
+    rt_vsync_end = (uint16_t)(rt_v_front_porch + rt_v_sync_width);
+    rt_blank_head = (uint16_t)(rt_vsync_end + rt_v_back_porch);
+    rt_active_end = (uint32_t)rt_blank_head + rt_v_active_lines;
     rt_sync_after_di = mode->h_sync_width - W_PREAMBLE - W_DATA_ISLAND;
 }
 
