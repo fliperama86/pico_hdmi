@@ -27,6 +27,16 @@ static uint32_t cached_v_total_lines = 525;
 #define DEFAULT_SAMPLES_PER_FRAME (48000 / 60)
 static uint32_t samples_per_line_fp = (DEFAULT_SAMPLES_PER_FRAME << 16) / 525;
 
+#if PICO_HDMI_EXACT_AUDIO_PACING
+// Exact-rational pacing: recovers the samples/s lost to samples_per_line_fp's
+// floor truncation. rem/den is the fractional remainder of
+// (sample_rate * h_total << 16) / pixel_clock; rem_accum carries it forward
+// so long-term delivery is exactly sample_rate instead of drifting low.
+static uint32_t audio_pacing_rem = 0;
+static uint32_t audio_pacing_den = 1;
+static uint32_t audio_pacing_rem_accum = 0;
+#endif
+
 // Limit accumulator to avoid overflow if we run dry.
 // Clamping to 1 packet (plus a tiny margin is implicit) ensures we don't burst.
 #define MAX_AUDIO_ACCUM (4 << 16)
@@ -48,6 +58,9 @@ void hstx_di_queue_init(void)
     di_ring_tail = 0;
     hstx_di_queue_silence_count = 0;
     audio_sample_accum = 0;
+#if PICO_HDMI_EXACT_AUDIO_PACING
+    audio_pacing_rem_accum = 0;
+#endif
     hstx_di_queue_build_silence_packet();
 }
 
@@ -68,6 +81,9 @@ void hstx_di_queue_set_hsync_active(bool hsync_active)
         di_ring_head = 0;
         di_ring_tail = 0;
         audio_sample_accum = 0;
+#if PICO_HDMI_EXACT_AUDIO_PACING
+        audio_pacing_rem_accum = 0;
+#endif
     }
     di_hsync_active = hsync_active;
     hstx_di_queue_build_silence_packet();
@@ -82,6 +98,16 @@ void hstx_di_queue_set_samples_per_line_fp(uint32_t value)
 {
     samples_per_line_fp = value;
 }
+
+#if PICO_HDMI_EXACT_AUDIO_PACING
+void hstx_di_queue_set_samples_per_line_exact(uint32_t spl_fp, uint32_t rem, uint32_t den)
+{
+    samples_per_line_fp = spl_fp;
+    audio_pacing_rem = rem;
+    audio_pacing_den = den;
+    audio_pacing_rem_accum = 0;
+}
+#endif
 
 #if PICO_HDMI_RAM_DI_QUEUE_PUSH
 bool __not_in_flash_func(hstx_di_queue_push)(const hstx_data_island_t *island)
@@ -110,6 +136,13 @@ uint32_t hstx_di_queue_get_level(void)
 void __scratch_x("") hstx_di_queue_tick(void)
 {
     audio_sample_accum += samples_per_line_fp;
+#if PICO_HDMI_EXACT_AUDIO_PACING
+    audio_pacing_rem_accum += audio_pacing_rem;
+    if (audio_pacing_rem_accum >= audio_pacing_den) {
+        audio_pacing_rem_accum -= audio_pacing_den;
+        audio_sample_accum += 1;
+    }
+#endif
 }
 
 const uint32_t *__scratch_x("") hstx_di_queue_get_audio_packet(void)

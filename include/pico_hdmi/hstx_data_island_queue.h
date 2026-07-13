@@ -56,6 +56,17 @@ bool hstx_di_queue_get_hsync_active(void);
  */
 void hstx_di_queue_set_samples_per_line_fp(uint32_t value);
 
+#if PICO_HDMI_EXACT_AUDIO_PACING
+/**
+ * Set exact-rational audio pacing on top of the truncated 16.16 samples-per-line.
+ * spl_fp is the truncated 16.16 samples-per-line (same value set_samples_per_line_fp
+ * would take); rem/den is the exact fractional remainder of
+ * (sample_rate * h_total << 16) / pixel_clock, so long-term delivery is exactly
+ * sample_rate instead of drifting low from floor truncation.
+ */
+void hstx_di_queue_set_samples_per_line_exact(uint32_t spl_fp, uint32_t rem, uint32_t den);
+#endif
+
 /**
  * Advance the Data Island scheduler by one scanline.
  * Must be called exactly once per scanline in the DMA ISR.

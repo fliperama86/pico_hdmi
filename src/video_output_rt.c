@@ -1185,8 +1185,19 @@ static void configure_audio_packets(uint32_t sample_rate)
     uint32_t pixel_clock_hz = clock_get_hz(clk_sys) / ((uint32_t)video_output_active_mode->hstx_clk_div *
                                                        video_output_active_mode->hstx_csr_clkdiv);
     uint32_t h_total = video_output_active_mode->h_total_pixels;
+#if PICO_HDMI_EXACT_AUDIO_PACING
+    // The floor truncation below loses up to line_rate/65536 samples/s versus
+    // the rate advertised over ACR, slowly draining the sink's audio buffer.
+    // Keep the exact fractional remainder and feed it back in via the queue's
+    // rational accumulator so long-term delivery is exactly sample_rate.
+    uint64_t num = ((uint64_t)sample_rate * h_total) << 16;
+    uint32_t spl = (uint32_t)(num / pixel_clock_hz);
+    uint32_t rem = (uint32_t)(num - (uint64_t)spl * pixel_clock_hz);
+    hstx_di_queue_set_samples_per_line_exact(spl, rem, pixel_clock_hz);
+#else
     uint32_t spl_fp = (uint32_t)(((uint64_t)sample_rate * h_total << 16) / pixel_clock_hz);
     hstx_di_queue_set_samples_per_line_fp(spl_fp);
+#endif
 
     hstx_packet_t packet;
     hstx_data_island_t island;
