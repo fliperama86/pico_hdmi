@@ -2,14 +2,12 @@
 
 #include "pico_hdmi/hstx_data_island_queue.h"
 #include "pico_hdmi/hstx_packet.h"
-#include "pico_hdmi/hstx_pins.h"
 #include "pico_hdmi/video_output.h" // for default sync polarity and DI placement
 
 #include "pico/stdlib.h"
 
 #include "hardware/clocks.h"
 #include "hardware/dma.h"
-#include "hardware/gpio.h"
 #include "hardware/irq.h"
 #include "hardware/structs/bus_ctrl.h"
 #include "hardware/structs/clocks.h"
@@ -21,6 +19,8 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+
+#include "hstx_pins_internal.h"
 
 #ifndef PICO_HDMI_RT_RUNTIME_MODE_ATTRS
 #define PICO_HDMI_RT_RUNTIME_MODE_ATTRS 0
@@ -494,8 +494,7 @@ static void hstx_resync(void)
     dma_channel_abort(DMACH_PONG);
 
     // 2. Disconnect GPIO before disabling HSTX (no garbage on pins)
-    for (int i = PIN_HSTX_CLK; i <= PIN_HSTX_D2 + 1; ++i)
-        gpio_set_function(i, GPIO_FUNC_SIO);
+    pico_hdmi_hstx_disconnect_pins();
 
     // 3. Disable HSTX (resets shift register, clock generator, and flushes FIFO)
     hstx_ctrl_hw->csr &= ~HSTX_CTRL_CSR_EN_BITS;
@@ -538,8 +537,7 @@ static void hstx_resync(void)
         tight_loop_contents();
 
     // 10. Reconnect GPIO — TV sees valid TMDS immediately
-    for (int i = PIN_HSTX_CLK; i <= PIN_HSTX_D2 + 1; ++i)
-        gpio_set_function(i, 0);
+    pico_hdmi_hstx_connect_pins(false);
 }
 
 // ============================================================================
@@ -1402,15 +1400,7 @@ void video_output_core1_run(void)
                         (uint32_t)video_output_active_mode->hstx_csr_clkdiv << HSTX_CTRL_CSR_CLKDIV_LSB |
                         5U << HSTX_CTRL_CSR_N_SHIFTS_LSB | 2U << HSTX_CTRL_CSR_SHIFT_LSB | HSTX_CTRL_CSR_EN_BITS;
 
-    hstx_ctrl_hw->bit[0] = HSTX_CTRL_BIT0_CLK_BITS | HSTX_CTRL_BIT0_INV_BITS;
-    hstx_ctrl_hw->bit[1] = HSTX_CTRL_BIT0_CLK_BITS;
-    for (uint lane = 0; lane < 3; ++lane) {
-        int bit = 2 + (lane * 2);
-        uint32_t lane_data_sel_bits = (lane * 10) << HSTX_CTRL_BIT0_SEL_P_LSB | ((lane * 10) + 1)
-                                                                                    << HSTX_CTRL_BIT0_SEL_N_LSB;
-        hstx_ctrl_hw->bit[bit] = lane_data_sel_bits | HSTX_CTRL_BIT0_INV_BITS;
-        hstx_ctrl_hw->bit[bit + 1] = lane_data_sel_bits;
-    }
+    pico_hdmi_hstx_configure_pinout();
 
     // DMA Setup (configured before GPIO connection to avoid TMDS garbage)
     dma_channel_config c = dma_channel_get_default_config(DMACH_PING);
@@ -1448,11 +1438,7 @@ void video_output_core1_run(void)
         tight_loop_contents();
 
     // NOW connect GPIO — TV's first TMDS exposure is valid data
-    for (int i = PIN_HSTX_CLK; i <= PIN_HSTX_D2 + 1; ++i) {
-        gpio_set_function(i, 0);
-        gpio_set_slew_rate(i, GPIO_SLEW_RATE_FAST);
-        gpio_set_drive_strength(i, GPIO_DRIVE_STRENGTH_12MA);
-    }
+    pico_hdmi_hstx_connect_pins(true);
 
     while (1) {
         // Check for pending mode switch

@@ -38,6 +38,32 @@ The library automatically handles sync polarity and Data Island placement per mo
 
 The HSTX output pins are configured for fast slew and 12mA drive. This gives the RP2350 enough edge margin for 720p60 on stricter sinks; weaker default pad settings can produce corruption or sync loss at 720p even when 480p is stable.
 
+### Custom HSTX Pinout
+
+By default, the library preserves its original mapping: CLK-/CLK+ on GPIO12/13, followed by D0-/D0+ through D2-/D2+ on GPIO14 through GPIO19. Existing applications do not need any changes.
+
+Boards that permute HSTX lanes or differential polarity can provide an explicit pinout before starting the Core 1 output loop:
+
+```c
+#include "pico_hdmi/hstx_pins.h"
+
+static const pico_hdmi_hstx_pinout_t custom_pinout = {
+    .clock = {.positive_gpio = 14, .negative_gpio = 15},
+    .data = {
+        {.positive_gpio = 12, .negative_gpio = 13}, // Logical TMDS D0
+        {.positive_gpio = 18, .negative_gpio = 19}, // Logical TMDS D1
+        {.positive_gpio = 16, .negative_gpio = 17}, // Logical TMDS D2
+    },
+};
+
+if (!video_output_set_hstx_pinout(&custom_pinout)) {
+    panic("Invalid HSTX pinout");
+}
+multicore_launch_core1(video_output_core1_run);
+```
+
+Each GPIO from 12 through 19 must appear exactly once. The pinout is copied by the library and works with both the compile-time and runtime-mode video backends.
+
 ## Prebuilt Demo UF2s
 
 GitHub Releases include ready-to-flash bouncing-box firmware for Pico 2:

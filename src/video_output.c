@@ -2,13 +2,11 @@
 
 #include "pico_hdmi/hstx_data_island_queue.h"
 #include "pico_hdmi/hstx_packet.h"
-#include "pico_hdmi/hstx_pins.h"
 
 #include "pico/stdlib.h"
 
 #include "hardware/clocks.h"
 #include "hardware/dma.h"
-#include "hardware/gpio.h"
 #include "hardware/irq.h"
 #include "hardware/structs/bus_ctrl.h"
 #include "hardware/structs/clocks.h"
@@ -18,6 +16,8 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+
+#include "hstx_pins_internal.h"
 
 #ifndef PICO_HDMI_LINE_BUFFER_IN_SCRATCH_Y
 #define PICO_HDMI_LINE_BUFFER_IN_SCRATCH_Y 0
@@ -805,22 +805,10 @@ void video_output_core1_run(void)
     hstx_ctrl_hw->csr = HSTX_CTRL_CSR_EXPAND_EN_BITS | (uint32_t)MODE_HSTX_CSR_CLKDIV << HSTX_CTRL_CSR_CLKDIV_LSB |
                         5U << HSTX_CTRL_CSR_N_SHIFTS_LSB | 2U << HSTX_CTRL_CSR_SHIFT_LSB | HSTX_CTRL_CSR_EN_BITS;
 
-    hstx_ctrl_hw->bit[0] = HSTX_CTRL_BIT0_CLK_BITS | HSTX_CTRL_BIT0_INV_BITS;
-    hstx_ctrl_hw->bit[1] = HSTX_CTRL_BIT0_CLK_BITS;
-    for (uint lane = 0; lane < 3; ++lane) {
-        int bit = 2 + (lane * 2);
-        uint32_t lane_data_sel_bits = (lane * 10) << HSTX_CTRL_BIT0_SEL_P_LSB | ((lane * 10) + 1)
-                                                                                    << HSTX_CTRL_BIT0_SEL_N_LSB;
-        hstx_ctrl_hw->bit[bit] = lane_data_sel_bits | HSTX_CTRL_BIT0_INV_BITS;
-        hstx_ctrl_hw->bit[bit + 1] = lane_data_sel_bits;
-    }
+    pico_hdmi_hstx_configure_pinout();
 
     // Set GPIO 12-19 to HSTX function (function 0 on RP2350)
-    for (int i = PIN_HSTX_CLK; i <= PIN_HSTX_D2 + 1; ++i) {
-        gpio_set_function(i, 0);
-        gpio_set_slew_rate(i, GPIO_SLEW_RATE_FAST);
-        gpio_set_drive_strength(i, GPIO_DRIVE_STRENGTH_12MA);
-    }
+    pico_hdmi_hstx_connect_pins(true);
 
     // DMA Setup
     dma_channel_config c = dma_channel_get_default_config(DMACH_PING);
