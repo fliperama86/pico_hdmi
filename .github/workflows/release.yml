@@ -1,0 +1,218 @@
+name: Build and Release Bouncing Box
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && 'main-release' || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
+
+env:
+  PICO_SDK_REF: 98a542c1a62fb549ffb5d66a3e5892b06276b670
+  PICO_SDK_VERSION: 2.3.0
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: 480p non-RT
+            id: 480p-nonrt
+            source: examples/bouncing_box
+            executable: bouncing_box
+            asset: bouncing_box.uf2
+            cmake_args: ""
+          - name: 720p non-RT
+            id: 720p-nonrt
+            source: examples/bouncing_box
+            executable: bouncing_box
+            asset: bouncing_box_720p_nonrt.uf2
+            cmake_args: -DBOUNCING_BOX_720P=ON -DPICO_HDMI_RUNTIME_MODES=OFF
+          - name: 720p RT
+            id: 720p-rt
+            source: examples/bouncing_box_rt
+            executable: bouncing_box_rt
+            asset: bouncing_box_720p_rt.uf2
+            cmake_args: ""
+
+    steps:
+      - name: Checkout PicoHDMI
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install ARM build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            gcc-arm-none-eabi \
+            libusb-1.0-0-dev \
+            libnewlib-arm-none-eabi \
+            libstdc++-arm-none-eabi-newlib \
+            ninja-build
+
+      - name: Checkout Pico SDK ${{ env.PICO_SDK_VERSION }}
+        uses: actions/checkout@v4
+        with:
+          repository: raspberrypi/pico-sdk
+          ref: ${{ env.PICO_SDK_REF }}
+          path: pico-sdk
+          submodules: recursive
+
+      - name: Configure ${{ matrix.name }}
+        env:
+          PICO_SDK_PATH: ${{ github.workspace }}/pico-sdk
+        run: |
+          cmake \
+            -S "${{ matrix.source }}" \
+            -B "build/${{ matrix.id }}" \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPICO_BOARD=weact_studio_rp2350b_core \
+            -DPICO_PLATFORM=rp2350-arm-s \
+            -DPICO_HDMI_EXACT_AUDIO_PACING=ON \
+            -DPICOTOOL_FORCE_FETCH_FROM_GIT=ON \
+            ${{ matrix.cmake_args }}
+
+      - name: Build ${{ matrix.name }}
+        run: cmake --build "build/${{ matrix.id }}" --parallel
+
+      - name: Validate and stage release asset
+        env:
+          BUILD_DIR: build/${{ matrix.id }}
+          EXECUTABLE: ${{ matrix.executable }}
+          ASSET: ${{ matrix.asset }}
+        run: |
+          set -euo pipefail
+          test -s "$BUILD_DIR/$EXECUTABLE.uf2"
+          test -s "$BUILD_DIR/$EXECUTABLE.elf"
+          arm-none-eabi-size "$BUILD_DIR/$EXECUTABLE.elf"
+
+          mkdir -p release-assets
+          cp "$BUILD_DIR/$EXECUTABLE.uf2" "release-assets/$ASSET"
+          (
+            cd release-assets
+            sha256sum "$ASSET" > "$ASSET.sha256"
+          )
+
+      - name: Upload ${{ matrix.name }} artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bouncing-box-${{ matrix.id }}
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish patch release
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout PicoHDMI history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bouncing-box-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Select patch version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin
+
+          existing_tag="$({
+            git tag --points-at "$GITHUB_SHA" --list 'v*' |
+              grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true
+          } | sort -V | tail -n 1)"
+
+          if [[ -n "$existing_tag" ]]; then
+            tag="$existing_tag"
+            previous_tag="$(git tag --list 'v*' --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -Fvx "$tag" | head -n 1 || true)"
+          else
+            previous_tag="$(git tag --list 'v*' --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
+            if [[ -z "$previous_tag" ]]; then
+              tag="v0.0.1"
+            else
+              version="${previous_tag#v}"
+              IFS=. read -r major minor patch <<< "$version"
+              tag="v${major}.${minor}.$((patch + 1))"
+            fi
+
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$tag" "$GITHUB_SHA" -m "PicoHDMI $tag"
+            git push origin "$tag"
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "previous_tag=$previous_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Generate release notes
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          PREVIOUS_TAG: ${{ steps.version.outputs.previous_tag }}
+        run: |
+          set -euo pipefail
+
+          {
+            echo "Automated bouncing-box release from \`main\` commit \`$GITHUB_SHA\`."
+            echo
+            echo "Built for \`weact_studio_rp2350b_core\` (RP2350B) with Pico SDK $PICO_SDK_VERSION."
+            echo
+            echo "**Assets:**"
+            echo "- \`bouncing_box.uf2\`: 640x480 @ 60 Hz, non-RT path"
+            echo "- \`bouncing_box_720p_nonrt.uf2\`: 1280x720 @ 60 Hz, non-RT path, copy-to-RAM"
+            echo "- \`bouncing_box_720p_rt.uf2\`: 1280x720 @ 60 Hz, RT path, copy-to-RAM"
+            echo
+            echo "Exact-rational HDMI audio Data Island pacing is enabled. SHA-256 sidecars are included."
+
+            if [[ -n "$PREVIOUS_TAG" ]]; then
+              echo
+              echo "**Changes since $PREVIOUS_TAG:**"
+              git log --no-merges --pretty='- %s (`%h`)' "$PREVIOUS_TAG..$GITHUB_SHA"
+            fi
+          } > release-notes.md
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mapfile -t assets < <(find release-assets -maxdepth 1 -type f -print | sort)
+          if [[ "${#assets[@]}" -ne 6 ]]; then
+            echo "Expected three UF2s and three SHA-256 sidecars, found ${#assets[@]} files" >&2
+            printf '%s\n' "${assets[@]}" >&2
+            exit 1
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${assets[@]}" --clobber
+            gh release edit "$TAG" --title "$TAG" --notes-file release-notes.md
+          else
+            gh release create "$TAG" "${assets[@]}" \
+              --title "$TAG" \
+              --notes-file release-notes.md \
+              --verify-tag
+          fi
