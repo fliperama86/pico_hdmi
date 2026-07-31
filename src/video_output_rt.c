@@ -163,20 +163,19 @@ static uint16_t tmds_ctrl_symbol(bool vsync_wire, bool hsync_wire)
     }
 }
 
-static uint32_t lane0_sync_symbol(bool sync_positive, bool vsync_active, bool hsync_active)
+static uint32_t lane0_sync_symbol(bool hsync_positive, bool vsync_positive, bool vsync_active, bool hsync_active)
 {
-    const bool vsync_wire = (vsync_active == sync_positive);
-    const bool hsync_wire = (hsync_active == sync_positive);
+    const bool vsync_wire = (vsync_active == vsync_positive);
+    const bool hsync_wire = (hsync_active == hsync_positive);
     return tmds_ctrl_symbol(vsync_wire, hsync_wire);
 }
 
 static void cache_sync_symbols(const video_mode_t *mode)
 {
-    const bool sync_positive = mode->sync_positive;
-    const uint32_t von_hon = lane0_sync_symbol(sync_positive, true, true);
-    const uint32_t von_hoff = lane0_sync_symbol(sync_positive, true, false);
-    const uint32_t voff_hon = lane0_sync_symbol(sync_positive, false, true);
-    const uint32_t voff_hoff = lane0_sync_symbol(sync_positive, false, false);
+    const uint32_t von_hon = lane0_sync_symbol(mode->hsync_positive, mode->vsync_positive, true, true);
+    const uint32_t von_hoff = lane0_sync_symbol(mode->hsync_positive, mode->vsync_positive, true, false);
+    const uint32_t voff_hon = lane0_sync_symbol(mode->hsync_positive, mode->vsync_positive, false, true);
+    const uint32_t voff_hoff = lane0_sync_symbol(mode->hsync_positive, mode->vsync_positive, false, false);
 
     rt_sync_v0_h0 = von_hon | (TMDS_CTRL_00 << 10) | (TMDS_CTRL_00 << 20);
     rt_sync_v0_h1 = von_hoff | (TMDS_CTRL_00 << 10) | (TMDS_CTRL_00 << 20);
@@ -228,7 +227,8 @@ const video_mode_t video_mode_480_p = {
     // identical (clk_hstx stays 126 MHz; only clk_sys speeds up).
     .hstx_clk_div = PICO_HDMI_480P_HSTX_CLK_DIV,
     .hstx_csr_clkdiv = 5,
-    .sync_positive = false,
+    .hsync_positive = false,
+    .vsync_positive = false,
     .data_island_in_hsync = true,
 };
 
@@ -245,32 +245,91 @@ const video_mode_t video_mode_240_p = {
     .v_total_lines = 262,
     .hstx_clk_div = 1,
     .hstx_csr_clkdiv = 5,
-    .sync_positive = false,
+    .hsync_positive = false,
+    .vsync_positive = false,
     .data_island_in_hsync = true,
 };
 
-// CEA VIC 4: 1280x720 @ 60Hz. Static builds use VIDEO_MODE_1280x720 so the
-// compile-time sync polarity and DI placement match; runtime-attribute builds
-// read those values from this descriptor.
-// Pixel clock 74.25 MHz; expect sys_clk = 372 MHz and vreg = 1.30V.
+// Exact-clock 1280x720 CVT reduced blanking. The normal runtime firmware uses
+// a 320 MHz system/HSTX clock, so CSR /5 gives an exact 64 MHz pixel clock.
+// This is a non-CTA 59.979 Hz timing with H+/V- sync and VIC 0 metadata.
 const video_mode_t video_mode_720_p = {
-    .h_front_porch = 110,
-    .h_sync_width = 40,
-    .h_back_porch = 220,
+    .h_front_porch = 48,
+    .h_sync_width = 32,
+    .h_back_porch = 80,
     .h_active_pixels = 1280,
-    .v_front_porch = 5,
+    .v_front_porch = 3,
     .v_sync_width = 5,
-    .v_back_porch = 20,
+    .v_back_porch = 13,
     .v_active_lines = 720,
-    .h_total_pixels = 1650,
-    .v_total_lines = 750,
+    .h_total_pixels = 1440,
+    .v_total_lines = 741,
     .hstx_clk_div = 1,
     .hstx_csr_clkdiv = 5,
-    .sync_positive = true,
+    .hsync_positive = true,
+    .vsync_positive = false,
     .data_island_in_hsync = false,
 };
 
+// VESA CVT 960x720 @ 60Hz, adjusted only to the exact 56.0 MHz pixel clock
+// available from a 280 MHz RP2350 PLL. The active raster is exactly the 3x
+// 320x240 image, so no active-area borders are required.
+const video_mode_t video_mode_960x720_p = {
+    .h_front_porch = 48,
+    .h_sync_width = 96,
+    .h_back_porch = 144,
+    .h_active_pixels = 960,
+    .v_front_porch = 3,
+    .v_sync_width = 4,
+    .v_back_porch = 21,
+    .v_active_lines = 720,
+    .h_total_pixels = 1248,
+    .v_total_lines = 748,
+    .hstx_clk_div = 1,
+    .hstx_csr_clkdiv = 5,
+    .hsync_positive = false,
+    .vsync_positive = true,
+    .data_island_in_hsync = true,
+};
+
+// 1024x768 PC timing near VESA DMT. A 324 MHz HSTX clock gives a 64.8 MHz
+// pixel clock; reducing the standard 160-pixel back porch to 156 keeps the
+// horizontal and vertical scan rates at 48.358 kHz and 59.998 Hz. The 960x720
+// image is centered inside the active raster with 32/24-pixel black borders.
+const video_mode_t video_mode_1024x768_p = {
+    .h_front_porch = 24,
+    .h_sync_width = 136,
+    .h_back_porch = 156,
+    .h_active_pixels = 1024,
+    .v_front_porch = 3,
+    .v_sync_width = 6,
+    .v_back_porch = 29,
+    .v_active_lines = 768,
+    .h_total_pixels = 1340,
+    .v_total_lines = 806,
+    .hstx_clk_div = 1,
+    .hstx_csr_clkdiv = 5,
+    .hsync_positive = false,
+    .vsync_positive = false,
+    .data_island_in_hsync = true,
+};
+
 const video_mode_t *video_output_active_mode = &video_mode_480_p;
+
+static video_output_hstx_source_t hstx_clock_source = VIDEO_OUTPUT_HSTX_SOURCE_CLK_SYS;
+static uint32_t hstx_clock_source_hz;
+
+static void configure_hstx_clock(const video_mode_t *mode)
+{
+    uint32_t auxsrc = CLOCKS_CLK_HSTX_CTRL_AUXSRC_VALUE_CLK_SYS;
+    uint32_t source_hz = clock_get_hz(clk_sys);
+    if (hstx_clock_source == VIDEO_OUTPUT_HSTX_SOURCE_PLL_USB) {
+        auxsrc = CLOCKS_CLK_HSTX_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB;
+        source_hz = hstx_clock_source_hz;
+    }
+    hard_assert(source_hz != 0U);
+    clock_configure_int_divider(clk_hstx, 0, auxsrc, source_hz, mode->hstx_clk_div);
+}
 
 // ============================================================================
 // ISR-Cached Timing Variables (written by apply_mode, read by ISR)
@@ -1167,8 +1226,7 @@ static uint32_t get_acr_n(uint32_t sample_rate)
 static void get_acr_params(uint32_t sample_rate, uint32_t *n, uint32_t *cts)
 {
     *n = get_acr_n(sample_rate);
-    uint32_t pixel_clock = clock_get_hz(clk_sys) / ((uint32_t)video_output_active_mode->hstx_clk_div *
-                                                    video_output_active_mode->hstx_csr_clkdiv);
+    uint32_t pixel_clock = clock_get_hz(clk_hstx) / video_output_active_mode->hstx_csr_clkdiv;
     *cts = (uint32_t)(((uint64_t)pixel_clock * *n) / (128ULL * sample_rate));
 }
 
@@ -1180,8 +1238,7 @@ static void configure_audio_packets(uint32_t sample_rate)
     // The default set_sample_rate() assumes exactly 60 Hz, which is wrong
     // for 240p (60.114 Hz). Derive from actual timing instead:
     //   samples_per_line = sample_rate * h_total_pixels / pixel_clock
-    uint32_t pixel_clock_hz = clock_get_hz(clk_sys) / ((uint32_t)video_output_active_mode->hstx_clk_div *
-                                                       video_output_active_mode->hstx_csr_clkdiv);
+    uint32_t pixel_clock_hz = clock_get_hz(clk_hstx) / video_output_active_mode->hstx_csr_clkdiv;
     uint32_t h_total = video_output_active_mode->h_total_pixels;
 #if PICO_HDMI_EXACT_AUDIO_PACING
     // The floor truncation below loses up to line_rate/65536 samples/s versus
@@ -1220,7 +1277,7 @@ static void configure_audio_packets(uint32_t sample_rate)
 static void init_rt_from_mode(const video_mode_t *mode)
 {
 #if PICO_HDMI_RT_RUNTIME_MODE_ATTRS
-    hstx_packet_set_sync_positive(mode->sync_positive);
+    hstx_packet_set_sync_polarity(mode->hsync_positive, mode->vsync_positive);
     rt_di_in_hsync = mode->data_island_in_hsync;
     rt_build_line_with_di = rt_di_in_hsync ? build_line_with_di : build_line_with_di_backporch;
     hstx_di_queue_set_hsync_active(rt_di_in_hsync);
@@ -1238,7 +1295,7 @@ static void init_rt_from_mode(const video_mode_t *mode)
     rt_vsync_end = (uint16_t)(rt_v_front_porch + rt_v_sync_width);
     rt_blank_head = (uint16_t)(rt_vsync_end + rt_v_back_porch);
     rt_active_end = (uint32_t)rt_blank_head + rt_v_active_lines;
-    rt_sync_after_di = mode->h_sync_width - W_PREAMBLE - W_DATA_ISLAND;
+    rt_sync_after_di = mode->data_island_in_hsync ? mode->h_sync_width - W_PREAMBLE - W_DATA_ISLAND : 0;
 }
 
 static void build_all_command_lists(const video_mode_t *mode)
@@ -1249,18 +1306,24 @@ static void build_all_command_lists(const video_mode_t *mode)
     dump_runtime_command_lists(mode);
 #endif
 
-    // AVI InfoFrame: VIC=0 (non-standard) to avoid strict pixel clock
-    // validation by sinks. Our 25.2 MHz is 0.1% off from standard 25.175 MHz.
+    // AVI InfoFrame: 480p remains CTA VIC 1. The 1280x720 descriptor is
+    // exact-clock CVT-RB, so it uses VIC 0 with explicit 16:9 metadata.
     hstx_packet_t packet;
     hstx_data_island_t island;
-    uint8_t vic = (mode->v_active_lines == 480) ? 1 : (mode->v_active_lines == 720) ? 4 : 0;
+    const bool mode_is_240p = mode->v_active_lines == 240 && mode->h_active_pixels == 1280;
+    const bool mode_is_720p_rb = mode->v_active_lines == 720 && mode->h_active_pixels == 1280;
+    uint8_t vic = (mode->v_active_lines == 480 && mode->h_active_pixels == 640) ? 1 : 0;
 #if PICO_HDMI_LEGACY_240P_AVI_INFOFRAME
     uint8_t pixel_repetition = 0;
 #else
-    uint8_t pixel_repetition = (mode->v_active_lines == 240 && mode->h_active_pixels == 1280) ? 3 : 0;
+    uint8_t pixel_repetition = mode_is_240p ? 3 : 0;
 #endif
     const bool di_hsync_active = data_island_hsync_active();
-    hstx_packet_set_avi_infoframe(&packet, vic, pixel_repetition);
+    if (mode_is_240p) {
+        hstx_packet_set_avi_infoframe(&packet, vic, pixel_repetition);
+    } else {
+        hstx_packet_set_avi_infoframe_aspect(&packet, vic, pixel_repetition, mode_is_720p_rb);
+    }
     hstx_encode_data_island(&island, &packet, false, di_hsync_active);
     vblank_avi_infoframe_len = BUILD_LINE_WITH_DI(vblank_avi_infoframe, island.words, false, false);
 
@@ -1342,11 +1405,8 @@ void video_output_init(uint16_t width, uint16_t height)
 
     build_all_command_lists(initial_mode);
 
-    // Configure clk_hstx
-    uint32_t sys_freq = clock_get_hz(clk_sys);
-    clock_configure_int_divider(clk_hstx,
-                                0, // No glitchless mux
-                                CLOCKS_CLK_HSTX_CTRL_AUXSRC_VALUE_CLK_SYS, sys_freq, initial_mode->hstx_clk_div);
+    // Configure clk_hstx from the application's selected parent clock.
+    configure_hstx_clock(initial_mode);
 
     // Claim DMA channels for HSTX (channels 0 and 1)
     dma_channel_claim(DMACH_PING);
@@ -1475,6 +1535,12 @@ void video_output_set_mode(const video_mode_t *mode)
     __dmb();
 }
 
+void video_output_set_hstx_source(video_output_hstx_source_t source, uint32_t source_hz)
+{
+    hstx_clock_source = source;
+    hstx_clock_source_hz = (source == VIDEO_OUTPUT_HSTX_SOURCE_PLL_USB) ? source_hz : 0U;
+}
+
 uint16_t video_output_get_h_active_pixels(void)
 {
     return rt_h_active_pixels;
@@ -1487,9 +1553,7 @@ uint16_t video_output_get_v_active_lines(void)
 
 void video_output_reconfigure_clock(void)
 {
-    uint32_t sys_freq = clock_get_hz(clk_sys);
-    clock_configure_int_divider(clk_hstx, 0, CLOCKS_CLK_HSTX_CTRL_AUXSRC_VALUE_CLK_SYS, sys_freq,
-                                video_output_active_mode->hstx_clk_div);
+    configure_hstx_clock(video_output_active_mode);
 }
 
 void video_output_update_acr(uint32_t pixel_clock_hz)

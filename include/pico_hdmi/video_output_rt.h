@@ -23,14 +23,22 @@ typedef struct {
     uint16_t v_total_lines;
     uint8_t hstx_clk_div;
     uint8_t hstx_csr_clkdiv;
-    bool sync_positive;
+    bool hsync_positive;
+    bool vsync_positive;
     bool data_island_in_hsync;
 } video_mode_t;
 
 extern const video_mode_t video_mode_480_p;
 extern const video_mode_t video_mode_240_p;
 extern const video_mode_t video_mode_720_p;
+extern const video_mode_t video_mode_960x720_p;
+extern const video_mode_t video_mode_1024x768_p;
 extern const video_mode_t *video_output_active_mode;
+
+typedef enum {
+    VIDEO_OUTPUT_HSTX_SOURCE_CLK_SYS = 0,
+    VIDEO_OUTPUT_HSTX_SOURCE_PLL_USB = 1,
+} video_output_hstx_source_t;
 
 // ============================================================================
 // Shared State (same as video_output.h)
@@ -102,6 +110,13 @@ void pico_hdmi_set_audio_sample_rate(uint32_t sample_rate);
  * @param mode Pointer to a video_mode_t (must remain valid, use VIDEO_MODE_480P/240P)
  */
 void video_output_set_mode(const video_mode_t *mode);
+
+/**
+ * Select the parent clock used by clk_hstx. Call before video_output_init().
+ * CLK_SYS ignores source_hz and reads the current system clock. PLL_USB
+ * requires the caller to configure that PLL first and provide its exact rate.
+ */
+void video_output_set_hstx_source(video_output_hstx_source_t source, uint32_t source_hz);
 
 /**
  * Get the active horizontal resolution in pixels.

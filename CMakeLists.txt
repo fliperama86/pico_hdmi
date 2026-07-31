@@ -5,6 +5,8 @@ option(PICO_HDMI_LINE_BUFFER_IN_SCRATCH_Y "Place the HDMI active-line DMA buffer
 option(PICO_HDMI_PRECOMPOSED_ACTIVE_LINES "Enable precomposed HDMI active-line templates and native 16-bit scanout support" OFF)
 option(PICO_HDMI_EXACT_AUDIO_PACING "Pace audio Data Islands with an exact rational accumulator (eliminates fixed-point drift vs ACR)" ON)
 option(PICO_HDMI_FRANK_PAD_CONFIG "Use Frank-style HSTX pads: 2 mA drive, slow slew, input buffers disabled" OFF)
+option(PICO_HDMI_EXPLICIT_AUDIO_CHANNEL_STATUS
+    "EXPERIMENTAL: emit explicit IEC 60958 consumer PCM/48k channel-status bits in audio sample packets" OFF)
 set(PICO_HDMI_HSTX_CLK_DIV "" CACHE STRING "Override MODE_HSTX_CLK_DIV; empty keeps mode default")
 
 if(PICO_HDMI_RUNTIME_MODES)
@@ -37,6 +39,10 @@ target_compile_definitions(pico_hdmi PUBLIC
     PICO_HDMI_PRECOMPOSED_ACTIVE_LINES=$<BOOL:${PICO_HDMI_PRECOMPOSED_ACTIVE_LINES}>
     PICO_HDMI_EXACT_AUDIO_PACING=$<BOOL:${PICO_HDMI_EXACT_AUDIO_PACING}>
     PICO_HDMI_FRANK_PAD_CONFIG=$<BOOL:${PICO_HDMI_FRANK_PAD_CONFIG}>
+)
+
+target_compile_definitions(pico_hdmi PRIVATE
+    PICO_HDMI_EXPLICIT_AUDIO_CHANNEL_STATUS=$<BOOL:${PICO_HDMI_EXPLICIT_AUDIO_CHANNEL_STATUS}>
 )
 
 if(PICO_HDMI_HSTX_CLK_DIV)

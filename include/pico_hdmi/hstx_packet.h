@@ -59,6 +59,7 @@ void hstx_packet_set_null(hstx_packet_t *packet);
 
 void hstx_packet_set_sync_positive(bool positive);
 bool hstx_packet_get_sync_positive(void);
+void hstx_packet_set_sync_polarity(bool hsync_positive, bool vsync_positive);
 void hstx_encode_data_island(hstx_data_island_t *out, const hstx_packet_t *packet, bool vsync, bool hsync);
 const uint32_t *hstx_get_null_data_island(bool vsync, bool hsync);
 

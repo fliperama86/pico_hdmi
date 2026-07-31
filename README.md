@@ -36,6 +36,22 @@ The library selects a mode at compile time via a single define:
 
 The library automatically handles sync polarity and Data Island placement per mode. For modes with a narrow hsync pulse (e.g. 720p60's 40-px hsync), the HDMI Data Island is placed in the back porch rather than inside the hsync pulse. This is transparent to callers.
 
+The runtime backend also exposes two application-selected PC timing
+descriptors. They are not compile-time demo modes and the application remains
+responsible for configuring the required HSTX parent clock before init.
+
+| Runtime descriptor | Active raster | Pixel clock | Totals | Sync | Status |
+|--------------------|---------------|-------------|--------|------|--------|
+| `video_mode_960x720_p` | 960x720 | 56.0 MHz | 1248x748 | H-, V+ | Compile-tested, not hardware-validated |
+| `video_mode_1024x768_p` | 1024x768 | 64.8 MHz | 1340x806 | H-, V- | Compile-tested, not hardware-validated |
+
+Runtime mode attributes track horizontal and vertical sync polarity
+separately. An application that provides a dedicated PLL_USB clock can call
+`video_output_set_hstx_source(VIDEO_OUTPUT_HSTX_SOURCE_PLL_USB, source_hz)`
+before `video_output_init()`. Audio ACR and pacing then derive the pixel clock
+from `clk_hstx`. The default remains `clk_sys`, so existing applications do
+not need to call this API.
+
 The HSTX output pins are configured for fast slew and 12mA drive. This gives the RP2350 enough edge margin for 720p60 on stricter sinks; weaker default pad settings can produce corruption or sync loss at 720p even when 480p is stable.
 
 ### Custom HSTX Pinout

@@ -153,14 +153,20 @@ void hstx_packet_set_null(hstx_packet_t *packet)
 
 void hstx_packet_set_sync_positive(bool positive)
 {
+    hstx_packet_set_sync_polarity(positive, positive);
+}
+
+void hstx_packet_set_sync_polarity(bool hsync_positive, bool vsync_positive)
+{
 #if PICO_HDMI_RT_RUNTIME_MODE_ATTRS
-    if (packet_hsync_positive != positive || packet_vsync_positive != positive) {
-        packet_hsync_positive = positive;
-        packet_vsync_positive = positive;
+    if (packet_hsync_positive != hsync_positive || packet_vsync_positive != vsync_positive) {
+        packet_hsync_positive = hsync_positive;
+        packet_vsync_positive = vsync_positive;
         null_islands_initialized = false;
     }
 #else
-    (void)positive;
+    (void)hsync_positive;
+    (void)vsync_positive;
 #endif
 }
 
@@ -368,6 +374,9 @@ int hstx_packet_set_audio_samples_cs(hstx_packet_t *packet, const audio_sample_t
 int hstx_packet_set_audio_samples(hstx_packet_t *packet, const audio_sample_t *samples, int num_samples,
                                   int frame_count)
 {
+#if PICO_HDMI_EXPLICIT_AUDIO_CHANNEL_STATUS
+    return hstx_packet_set_audio_samples_cs(packet, samples, num_samples, frame_count);
+#else
     hstx_packet_init(packet);
     if (num_samples < 1)
         num_samples = 1;
@@ -409,6 +418,7 @@ int hstx_packet_set_audio_samples(hstx_packet_t *packet, const audio_sample_t *s
     }
 
     return temp_frame_count;
+#endif
 }
 
 static inline uint32_t make_hstx_word(uint16_t lane0, uint16_t lane1, uint16_t lane2)
