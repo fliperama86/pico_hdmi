@@ -42,20 +42,13 @@
 #define TMDS_CTRL_10 0x154u // vsync=1 hsync=0
 #define TMDS_CTRL_11 0x2abu // vsync=1 hsync=1
 
-// Map semantic "V asserted / V inactive" and "H asserted / H inactive" to TMDS bits.
-// Negative polarity (default, VIC 1 etc.): asserted = 0 on wire.
-// Positive polarity (720p60 VIC 4, etc.): asserted = 1 on wire.
-#ifdef MODE_SYNC_POSITIVE
-#define _TMDS_VON_HON TMDS_CTRL_11
-#define _TMDS_VON_HOFF TMDS_CTRL_10
-#define _TMDS_VOFF_HON TMDS_CTRL_01
-#define _TMDS_VOFF_HOFF TMDS_CTRL_00
-#else
-#define _TMDS_VON_HON TMDS_CTRL_00
-#define _TMDS_VON_HOFF TMDS_CTRL_01
-#define _TMDS_VOFF_HON TMDS_CTRL_10
-#define _TMDS_VOFF_HOFF TMDS_CTRL_11
-#endif
+// Map semantic pulse state to the actual wire levels. CVT reduced blanking
+// uses mixed polarity (H positive, V negative), unlike the CTA modes here.
+#define TMDS_CTRL_SYMBOL(v, h) ((v) ? ((h) ? TMDS_CTRL_11 : TMDS_CTRL_10) : ((h) ? TMDS_CTRL_01 : TMDS_CTRL_00))
+#define _TMDS_VON_HON TMDS_CTRL_SYMBOL(MODE_V_SYNC_POSITIVE, MODE_H_SYNC_POSITIVE)
+#define _TMDS_VON_HOFF TMDS_CTRL_SYMBOL(MODE_V_SYNC_POSITIVE, !MODE_H_SYNC_POSITIVE)
+#define _TMDS_VOFF_HON TMDS_CTRL_SYMBOL(!MODE_V_SYNC_POSITIVE, MODE_H_SYNC_POSITIVE)
+#define _TMDS_VOFF_HOFF TMDS_CTRL_SYMBOL(!MODE_V_SYNC_POSITIVE, !MODE_H_SYNC_POSITIVE)
 
 // Sync symbols: Lane 0 carries sync, Lanes 1&2 are always CTRL_00
 // Naming: V0 = vsync asserted, V1 = vsync inactive; H0 = hsync asserted, H1 = hsync inactive
@@ -675,7 +668,8 @@ static void get_acr_params(uint32_t sample_rate, uint32_t *n, uint32_t *cts)
 {
     *n = get_acr_n(sample_rate);
     uint32_t pixel_clock = clock_get_hz(clk_hstx) / MODE_HSTX_CSR_CLKDIV;
-    *cts = (uint32_t)(((uint64_t)pixel_clock * *n) / (128ULL * sample_rate));
+    uint64_t denominator = 128ULL * sample_rate;
+    *cts = (uint32_t)((((uint64_t)pixel_clock * *n) + (denominator / 2)) / denominator);
 }
 
 static void configure_audio_packets(uint32_t sample_rate)
@@ -688,8 +682,14 @@ static void configure_audio_packets(uint32_t sample_rate)
     // ACR still advertises 48 kHz; if we also emit 800 samples every video
     // frame, stricter sinks eventually overflow their audio clock domain.
     uint32_t pixel_clock_hz = clock_get_hz(clk_hstx) / MODE_HSTX_CSR_CLKDIV;
-    uint32_t spl_fp = (uint32_t)(((uint64_t)sample_rate * MODE_H_TOTAL_PIXELS << 16) / pixel_clock_hz);
+    uint64_t pacing_numerator = ((uint64_t)sample_rate * MODE_H_TOTAL_PIXELS) << 16;
+    uint32_t spl_fp = (uint32_t)(pacing_numerator / pixel_clock_hz);
+#if PICO_HDMI_EXACT_AUDIO_PACING
+    uint32_t pacing_remainder = (uint32_t)(pacing_numerator - (uint64_t)spl_fp * pixel_clock_hz);
+    hstx_di_queue_set_samples_per_line_exact(spl_fp, pacing_remainder, pixel_clock_hz);
+#else
     hstx_di_queue_set_samples_per_line_fp(spl_fp);
+#endif
 
     hstx_packet_t packet;
     hstx_data_island_t island;
@@ -740,14 +740,16 @@ void video_output_init(uint16_t width, uint16_t height)
     hstx_packet_t packet;
     hstx_data_island_t island;
 
-    // VIC=1 for 640x480, VIC=4 for 720p60, VIC=0 for non-standard timings (e.g. 240p)
-    uint8_t vic = (height == 480) ? 1 : (height == 720) ? 4 : 0;
+    // The compile-time timing profile owns its matching CEA VIC. In
+    // particular, 720p50 must advertise VIC 19 rather than masquerading as
+    // the otherwise geometrically similar 720p60 VIC 4 mode.
+    uint8_t vic = MODE_CEA_VIC;
 #if defined(VIDEO_MODE_320x240) && !PICO_HDMI_LEGACY_240P_AVI_INFOFRAME
     uint8_t pixel_repetition = 3;
 #else
     uint8_t pixel_repetition = 0;
 #endif
-    hstx_packet_set_avi_infoframe(&packet, vic, pixel_repetition);
+    hstx_packet_set_avi_infoframe_aspect(&packet, vic, pixel_repetition, MODE_AVI_ASPECT_16_9 != 0);
     hstx_encode_data_island(&island, &packet, false, DI_HSYNC_ACTIVE);
     vblank_avi_infoframe_len = build_line_with_di(vblank_avi_infoframe, island.words, false, false);
 

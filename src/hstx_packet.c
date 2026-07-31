@@ -37,17 +37,15 @@ static const uint16_t ter_c4[16] = {
 
 #define GUARD_BAND_SYMBOL 0x133u // 0b0100110011
 
-#ifdef MODE_SYNC_POSITIVE
-#define HSTX_PACKET_DEFAULT_SYNC_POSITIVE true
-#else
-#define HSTX_PACKET_DEFAULT_SYNC_POSITIVE false
-#endif
+#define HSTX_PACKET_DEFAULT_HSYNC_POSITIVE (MODE_H_SYNC_POSITIVE != 0)
+#define HSTX_PACKET_DEFAULT_VSYNC_POSITIVE (MODE_V_SYNC_POSITIVE != 0)
 
 static hstx_data_island_t null_islands[4];
 static bool null_islands_initialized = false;
 
 #if PICO_HDMI_RT_RUNTIME_MODE_ATTRS
-static bool packet_sync_positive = HSTX_PACKET_DEFAULT_SYNC_POSITIVE;
+static bool packet_hsync_positive = HSTX_PACKET_DEFAULT_HSYNC_POSITIVE;
+static bool packet_vsync_positive = HSTX_PACKET_DEFAULT_VSYNC_POSITIVE;
 #endif
 
 // ============================================================================
@@ -156,8 +154,9 @@ void hstx_packet_set_null(hstx_packet_t *packet)
 void hstx_packet_set_sync_positive(bool positive)
 {
 #if PICO_HDMI_RT_RUNTIME_MODE_ATTRS
-    if (packet_sync_positive != positive) {
-        packet_sync_positive = positive;
+    if (packet_hsync_positive != positive || packet_vsync_positive != positive) {
+        packet_hsync_positive = positive;
+        packet_vsync_positive = positive;
         null_islands_initialized = false;
     }
 #else
@@ -168,9 +167,27 @@ void hstx_packet_set_sync_positive(bool positive)
 bool hstx_packet_get_sync_positive(void)
 {
 #if PICO_HDMI_RT_RUNTIME_MODE_ATTRS
-    return packet_sync_positive;
+    return packet_hsync_positive && packet_vsync_positive;
 #else
-    return HSTX_PACKET_DEFAULT_SYNC_POSITIVE;
+    return HSTX_PACKET_DEFAULT_HSYNC_POSITIVE && HSTX_PACKET_DEFAULT_VSYNC_POSITIVE;
+#endif
+}
+
+static bool hstx_packet_get_hsync_positive(void)
+{
+#if PICO_HDMI_RT_RUNTIME_MODE_ATTRS
+    return packet_hsync_positive;
+#else
+    return HSTX_PACKET_DEFAULT_HSYNC_POSITIVE;
+#endif
+}
+
+static bool hstx_packet_get_vsync_positive(void)
+{
+#if PICO_HDMI_RT_RUNTIME_MODE_ATTRS
+    return packet_vsync_positive;
+#else
+    return HSTX_PACKET_DEFAULT_VSYNC_POSITIVE;
 #endif
 }
 
@@ -222,6 +239,12 @@ void hstx_packet_set_audio_infoframe(hstx_packet_t *packet, uint32_t sample_rate
 
 void hstx_packet_set_avi_infoframe(hstx_packet_t *packet, uint8_t vic, uint8_t pixel_repetition)
 {
+    hstx_packet_set_avi_infoframe_aspect(packet, vic, pixel_repetition, vic == 4 || vic == 19);
+}
+
+void hstx_packet_set_avi_infoframe_aspect(hstx_packet_t *packet, uint8_t vic, uint8_t pixel_repetition,
+                                          bool aspect_16_9)
+{
     hstx_packet_init(packet);
     packet->header[0] = 0x82;
     packet->header[1] = 0x02;
@@ -234,8 +257,10 @@ void hstx_packet_set_avi_infoframe(hstx_packet_t *packet, uint8_t vic, uint8_t p
     } else
 #endif
     {
-        packet->subpacket[0][1] = 0x10;                     // A=1: active format information is valid.
-        packet->subpacket[0][2] = (vic == 4) ? 0x28 : 0x18; // 16:9 for 720p, 4:3 otherwise; R=8.
+        packet->subpacket[0][1] = 0x10; // A=1: active format information is valid.
+        // R=8 means same picture and coded aspect ratio. Reduced-blanking
+        // 720p uses VIC 0 but still needs the 16:9 picture aspect code.
+        packet->subpacket[0][2] = aspect_16_9 ? 0x28 : 0x18;
     }
     packet->subpacket[0][3] = 0x00;
     packet->subpacket[0][4] = vic;
@@ -245,17 +270,46 @@ void hstx_packet_set_avi_infoframe(hstx_packet_t *packet, uint8_t vic, uint8_t p
     compute_all_parity(packet);
 }
 
-// IEC 60958-3 channel status sequence, one bit per audio frame across the
-// 192-frame block: consumer, L-PCM, copy permitted (byte0=0x04), 48 kHz
-// sample frequency (byte3=0x02). All later bytes zero.
-static inline int channel_status_bit(int frame)
+// IEC 60958-3 consumer channel status, one bit per audio frame across the
+// 192-frame block. Byte 0 declares consumer L-PCM/copy permitted; byte 3
+// carries the sample-frequency code. Remaining bytes are zero.
+static uint8_t channel_status_sample_frequency(uint32_t sample_rate)
 {
-    static const uint8_t cs[5] = {0x04, 0x00, 0x00, 0x02, 0x00};
-    return frame < 40 ? (cs[frame >> 3] >> (frame & 7)) & 1 : 0;
+    switch (sample_rate) {
+        case 32000:
+            return 0x03;
+        case 44100:
+            return 0x00;
+        case 48000:
+            return 0x02;
+        case 88200:
+            return 0x08;
+        case 96000:
+            return 0x0a;
+        case 176400:
+            return 0x0c;
+        case 192000:
+            return 0x0e;
+        default:
+            return 0x01; // Sample rate not indicated.
+    }
 }
 
-int hstx_packet_set_audio_samples_cs(hstx_packet_t *packet, const audio_sample_t *samples, int num_samples,
-                                     int frame_count)
+static inline int channel_status_bit(int frame, uint32_t sample_rate)
+{
+    if (frame >= 40)
+        return 0;
+
+    uint8_t value = 0;
+    if (frame < 8)
+        value = 0x04;
+    else if (frame >= 24 && frame < 32)
+        value = channel_status_sample_frequency(sample_rate);
+    return (value >> (frame & 7)) & 1;
+}
+
+int hstx_packet_set_audio_samples_cs_rate(hstx_packet_t *packet, const audio_sample_t *samples, int num_samples,
+                                          int frame_count, uint32_t sample_rate)
 {
     hstx_packet_init(packet);
     if (num_samples < 1)
@@ -283,7 +337,7 @@ int hstx_packet_set_audio_samples_cs(hstx_packet_t *packet, const audio_sample_t
         uint8_t *d = packet->subpacket[i];
         int16_t left = samples[i].left;
         int16_t right = samples[i].right;
-        int c = channel_status_bit(fc);
+        int c = channel_status_bit(fc, sample_rate);
         fc = (fc + 1) % 192;
 
         d[0] = 0x00;
@@ -303,6 +357,12 @@ int hstx_packet_set_audio_samples_cs(hstx_packet_t *packet, const audio_sample_t
     }
 
     return temp_frame_count;
+}
+
+int hstx_packet_set_audio_samples_cs(hstx_packet_t *packet, const audio_sample_t *samples, int num_samples,
+                                     int frame_count)
+{
+    return hstx_packet_set_audio_samples_cs_rate(packet, samples, num_samples, frame_count, 48000);
 }
 
 int hstx_packet_set_audio_samples(hstx_packet_t *packet, const audio_sample_t *samples, int num_samples,
@@ -404,8 +464,9 @@ void hstx_encode_data_island(hstx_data_island_t *out, const hstx_packet_t *packe
     // vsync_active/hsync_active indicate pulse region, not wire level.
     // The hv field encodes the actual wire bits (bit1=vsync, bit0=hsync), so
     // pulse-region semantics are inverted for negative-polarity modes.
-    const bool sync_positive = hstx_packet_get_sync_positive();
-    int hv = (vsync_active == sync_positive ? 2 : 0) | (hsync_active == sync_positive ? 1 : 0);
+    const bool vsync_positive = hstx_packet_get_vsync_positive();
+    const bool hsync_positive = hstx_packet_get_hsync_positive();
+    int hv = (vsync_active == vsync_positive ? 2 : 0) | (hsync_active == hsync_positive ? 1 : 0);
     uint16_t lane0[32];
     uint16_t lane1[32];
     uint16_t lane2[32];

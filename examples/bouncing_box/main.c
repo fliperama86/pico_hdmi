@@ -41,7 +41,10 @@
 #define BOX_COLOR 0xFFE0 // Yellow (RGB565)
 
 // Audio configuration
-#define AUDIO_SAMPLE_RATE 48000
+#ifndef BOUNCING_BOX_AUDIO_SAMPLE_RATE
+#define BOUNCING_BOX_AUDIO_SAMPLE_RATE 48000
+#endif
+#define AUDIO_SAMPLE_RATE BOUNCING_BOX_AUDIO_SAMPLE_RATE
 #define TONE_AMPLITUDE 6000
 
 // ============================================================================
@@ -71,6 +74,9 @@ static int current_melody_length = KOROBEINIKI_LENGTH;
 
 static int melody_index = 0;
 static int note_frames_remaining = 0;
+#ifdef VIDEO_MODE_50HZ
+static uint32_t melody_tick_accum = 0;
+#endif
 
 static void init_sine_table(void)
 {
@@ -95,6 +101,22 @@ static void advance_melody(void)
     }
 }
 
+static void advance_melody_for_video_frame(void)
+{
+#ifdef VIDEO_MODE_50HZ
+    // The melody durations are expressed in 60 Hz video-frame ticks. Advance
+    // six melody ticks per five 50 Hz frames so the 50 Hz diagnostic plays
+    // the same notes for the same wall-clock duration as the 60 Hz control.
+    melody_tick_accum += 6;
+    while (melody_tick_accum >= 5) {
+        melody_tick_accum -= 5;
+        advance_melody();
+    }
+#else
+    advance_melody();
+#endif
+}
+
 static inline int16_t get_sine_sample(void)
 {
     if (phase_increment == 0)
@@ -116,7 +138,8 @@ static void generate_audio(void)
         }
 
         hstx_packet_t packet;
-        audio_frame_counter = hstx_packet_set_audio_samples(&packet, samples, 4, audio_frame_counter);
+        audio_frame_counter =
+            hstx_packet_set_audio_samples_cs_rate(&packet, samples, 4, audio_frame_counter, AUDIO_SAMPLE_RATE);
 
         hstx_data_island_t island;
         hstx_encode_data_island(&island, &packet, false, DI_HSYNC_ACTIVE);
@@ -193,9 +216,15 @@ static void update_box(void)
 
 int main(void)
 {
-#ifdef VIDEO_MODE_1280x720
-    // 720p60: 372 MHz at 1.3V. Closest achievable to 371.25 MHz with 12 MHz XOSC
-    // (0.2% high -> 74.4 MHz pixel clock, within HDMI tolerance for 720p60).
+#ifdef VIDEO_MODE_720P_RB
+    // Exact-clock 720p60 CVT reduced blanking: 320 MHz / 5 = 64 MHz
+    // pixel clock. This removes the standard mode's 0.2% clock offset.
+    vreg_set_voltage(VREG_VOLTAGE_1_20);
+    sleep_ms(10);
+    set_sys_clock_khz(320000, true);
+#elif defined(VIDEO_MODE_1280x720)
+    // 720p50/60: 372 MHz at 1.3V. Closest achievable to 371.25 MHz with
+    // 12 MHz XOSC (0.2% high -> 74.4 MHz pixel clock).
     vreg_set_voltage(VREG_VOLTAGE_1_30);
     sleep_ms(10);
     set_sys_clock_khz(372000, true);
@@ -222,6 +251,11 @@ int main(void)
     // Initialize HDMI output
     hstx_di_queue_init();
     video_output_init(FRAME_WIDTH, FRAME_HEIGHT);
+#ifndef BOUNCING_BOX_DVI_ONLY
+    // Keep ACR, Audio InfoFrame, packet cadence, and IEC 60958 channel status
+    // consistent with the generated sample stream.
+    pico_hdmi_set_audio_sample_rate(AUDIO_SAMPLE_RATE);
+#endif
 #ifdef BOUNCING_BOX_DVI_ONLY
     video_output_set_dvi_mode(true);
 #endif
@@ -260,8 +294,9 @@ int main(void)
         update_box();
 
 #ifndef BOUNCING_BOX_DVI_ONLY
-        // Advance melody (one note step per frame)
-        advance_melody();
+        // Keep melody timing constant between the 50 Hz diagnostic and the
+        // normal 60 Hz control.
+        advance_melody_for_video_frame();
 #endif
 
         // LED heartbeat

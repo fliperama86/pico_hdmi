@@ -26,6 +26,10 @@
 #define MODE_V_SYNC_WIDTH 4
 #define MODE_V_BACK_PORCH 14
 #define MODE_V_ACTIVE_LINES 240
+#define MODE_CEA_VIC 0
+#define MODE_AVI_ASPECT_16_9 0
+#define MODE_H_SYNC_POSITIVE 0
+#define MODE_V_SYNC_POSITIVE 0
 
 #ifndef MODE_HSTX_CLK_DIV
 // HSTX clock divider: clk_sys / 1 = 126 MHz -> 25.2 MHz pixel clock (with CSR_CLKDIV=5).
@@ -35,10 +39,38 @@
 
 #elif defined(VIDEO_MODE_1280x720)
 
-// 1280x720 @ 60Hz (CEA VIC 4)
-// Pixel clock: 74.25 MHz (using sys_clk=372 MHz gives 74.4 MHz, within HDMI tolerance)
-// Sync polarity: both H and V are POSITIVE (unlike VIC 1's negative)
+// Exact-clock 1280x720 CVT reduced blanking: 64 MHz pixel clock from a
+// 320 MHz system clock, 1440x741 totals, 59.979 Hz. This is not a CTA mode,
+// so its AVI InfoFrame uses VIC 0 while declaring a 16:9 picture.
+#ifdef VIDEO_MODE_720P_RB
+#define MODE_H_FRONT_PORCH 48
+#define MODE_H_SYNC_WIDTH 32
+#define MODE_H_BACK_PORCH 80
+#define MODE_H_ACTIVE_PIXELS 1280
+
+#define MODE_V_FRONT_PORCH 3
+#define MODE_V_SYNC_WIDTH 5
+#define MODE_V_BACK_PORCH 13
+#define MODE_V_ACTIVE_LINES 720
+
+#define MODE_CEA_VIC 0
+#define MODE_AVI_ASPECT_16_9 1
+#define MODE_H_SYNC_POSITIVE 1
+#define MODE_V_SYNC_POSITIVE 0
+
+#else
+
+// 1280x720 CTA mode. Both 50 Hz and 60 Hz use a nominal 74.25 MHz pixel
+// clock, positive sync, 750 total lines, and the same back porch. The 50 Hz
+// variant extends the horizontal front porch to 440 pixels (1980 total).
+// Using sys_clk=372 MHz gives 74.4 MHz, 0.2% above nominal.
+#ifdef VIDEO_MODE_50HZ
+#define MODE_H_FRONT_PORCH 440
+#define MODE_CEA_VIC 19
+#else
 #define MODE_H_FRONT_PORCH 110
+#define MODE_CEA_VIC 4
+#endif
 #define MODE_H_SYNC_WIDTH 40
 #define MODE_H_BACK_PORCH 220
 #define MODE_H_ACTIVE_PIXELS 1280
@@ -48,14 +80,18 @@
 #define MODE_V_BACK_PORCH 20
 #define MODE_V_ACTIVE_LINES 720
 
+#define MODE_AVI_ASPECT_16_9 1
+#define MODE_H_SYNC_POSITIVE 1
+#define MODE_V_SYNC_POSITIVE 1
+#define MODE_SYNC_POSITIVE 1
+
+#endif // VIDEO_MODE_720P_RB
+
 #ifndef MODE_HSTX_CLK_DIV
-// HSTX clock: sys_clk / 1 = 372 MHz -> 74.4 MHz pixel clock (with CSR_CLKDIV=5)
+// HSTX clock: sys_clk / 1; CSR_CLKDIV=5 produces the selected pixel clock.
 #define MODE_HSTX_CLK_DIV 1
 #endif
 #define MODE_HSTX_CSR_CLKDIV 5
-
-// 720p60 uses positive sync polarity on both H and V
-#define MODE_SYNC_POSITIVE 1
 
 #else
 
@@ -70,6 +106,10 @@
 #define MODE_V_SYNC_WIDTH 2
 #define MODE_V_BACK_PORCH 33
 #define MODE_V_ACTIVE_LINES 480
+#define MODE_CEA_VIC 1
+#define MODE_AVI_ASPECT_16_9 0
+#define MODE_H_SYNC_POSITIVE 0
+#define MODE_V_SYNC_POSITIVE 0
 
 #ifndef MODE_HSTX_CLK_DIV
 // HSTX clock divider: 1 (stock 126 MHz sys_clk -> 25.2 MHz pixel clock).

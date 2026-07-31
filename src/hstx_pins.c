@@ -8,6 +8,10 @@
 #define HSTX_FIRST_GPIO 12U
 #define HSTX_LAST_GPIO 19U
 
+#ifndef PICO_HDMI_FRANK_PAD_CONFIG
+#define PICO_HDMI_FRANK_PAD_CONFIG 0
+#endif
+
 // This initializer reproduces the original hardcoded crossbar configuration
 // exactly. In particular, the lower-numbered pin of each pair is inverted.
 static pico_hdmi_hstx_pinout_t hstx_pinout = {
@@ -85,8 +89,16 @@ void pico_hdmi_hstx_connect_pins(bool configure_pads)
     for (uint gpio = HSTX_FIRST_GPIO; gpio <= HSTX_LAST_GPIO; ++gpio) {
         gpio_set_function(gpio, GPIO_FUNC_HSTX);
         if (configure_pads) {
+#if PICO_HDMI_FRANK_PAD_CONFIG
+            // Diagnostic configuration matching frank-hdmi-audio: minimum
+            // output drive, slew limiting, and no unused digital input path.
+            gpio_set_slew_rate(gpio, GPIO_SLEW_RATE_SLOW);
+            gpio_set_drive_strength(gpio, GPIO_DRIVE_STRENGTH_2MA);
+            gpio_set_input_enabled(gpio, false);
+#else
             gpio_set_slew_rate(gpio, GPIO_SLEW_RATE_FAST);
             gpio_set_drive_strength(gpio, GPIO_DRIVE_STRENGTH_12MA);
+#endif
         }
     }
 }

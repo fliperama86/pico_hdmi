@@ -39,6 +39,8 @@ void hstx_packet_set_acr(hstx_packet_t *packet, uint32_t n, uint32_t cts);
 void hstx_packet_set_audio_infoframe(hstx_packet_t *packet, uint32_t sample_rate, uint8_t channels,
                                      uint8_t bits_per_sample);
 void hstx_packet_set_avi_infoframe(hstx_packet_t *packet, uint8_t vic, uint8_t pixel_repetition);
+void hstx_packet_set_avi_infoframe_aspect(hstx_packet_t *packet, uint8_t vic, uint8_t pixel_repetition,
+                                          bool aspect_16_9);
 int hstx_packet_set_audio_samples(hstx_packet_t *packet, const audio_sample_t *samples, int num_samples,
                                   int frame_count);
 // As above, but with a proper IEC 60958 channel status bit sequence
@@ -46,6 +48,9 @@ int hstx_packet_set_audio_samples(hstx_packet_t *packet, const audio_sample_t *s
 // receivers (e.g. ones that re-encode audio) may require this.
 int hstx_packet_set_audio_samples_cs(hstx_packet_t *packet, const audio_sample_t *samples, int num_samples,
                                      int frame_count);
+// Sample-rate-aware form used when the stream is not 48 kHz.
+int hstx_packet_set_audio_samples_cs_rate(hstx_packet_t *packet, const audio_sample_t *samples, int num_samples,
+                                          int frame_count, uint32_t sample_rate);
 void hstx_packet_set_null(hstx_packet_t *packet);
 
 // ============================================================================
