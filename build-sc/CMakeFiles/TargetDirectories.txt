@@ -1,0 +1,3 @@
+/Users/dudu/Projects/neogeo/neopico-hd/lib/pico_hdmi/build-sc/CMakeFiles/pico_hdmi.dir
+/Users/dudu/Projects/neogeo/neopico-hd/lib/pico_hdmi/build-sc/CMakeFiles/edit_cache.dir
+/Users/dudu/Projects/neogeo/neopico-hd/lib/pico_hdmi/build-sc/CMakeFiles/rebuild_cache.dir

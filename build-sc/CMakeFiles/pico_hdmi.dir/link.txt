@@ -1,0 +1,2 @@
+/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ar qc libpico_hdmi.a CMakeFiles/pico_hdmi.dir/src/video_output.o CMakeFiles/pico_hdmi.dir/src/hstx_data_island_queue.o CMakeFiles/pico_hdmi.dir/src/hstx_packet.o CMakeFiles/pico_hdmi.dir/src/hstx_pins.o
+/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ranlib libpico_hdmi.a

@@ -58,6 +58,15 @@
 #define PICO_HDMI_480P_HSTX_CLK_DIV 1
 #endif
 
+// Same mechanism as PICO_HDMI_480P_HSTX_CLK_DIV, for 240p. Default 1 (stock
+// 126 MHz sys_clk -> 25.2 MHz pixel). A consumer overclocking 240p (e.g. 252
+// MHz, to give Core 0's per-pixel conversion more headroom per line) sets
+// this to 2 to keep the pixel clock unchanged (clk_hstx stays 126 MHz; only
+// clk_sys speeds up).
+#ifndef PICO_HDMI_240P_HSTX_CLK_DIV
+#define PICO_HDMI_240P_HSTX_CLK_DIV 1
+#endif
+
 #ifndef PICO_HDMI_ALIGN_DI_BUFFERS
 #define PICO_HDMI_ALIGN_DI_BUFFERS 0
 #endif
@@ -243,7 +252,11 @@ const video_mode_t video_mode_240_p = {
     .v_active_lines = 240,
     .h_total_pixels = 1600,
     .v_total_lines = 262,
-    .hstx_clk_div = 1,
+    // Pixel = sys_clk / (hstx_clk_div * hstx_csr_clkdiv); 1*5 -> 25.2 MHz at
+    // the stock 126 MHz. A consumer overclocking 240p (e.g. 252 MHz, same
+    // reasoning as 480p above) defines PICO_HDMI_240P_HSTX_CLK_DIV=2 to keep
+    // pixel/signal identical (clk_hstx stays 126 MHz; only clk_sys speeds up).
+    .hstx_clk_div = PICO_HDMI_240P_HSTX_CLK_DIV,
     .hstx_csr_clkdiv = 5,
     .hsync_positive = false,
     .vsync_positive = false,
