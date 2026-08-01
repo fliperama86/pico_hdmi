@@ -30,6 +30,16 @@ typedef struct {
 
 extern const video_mode_t video_mode_480_p;
 extern const video_mode_t video_mode_240_p;
+#ifndef PICO_HDMI_VBLANK_HTRIM
+#define PICO_HDMI_VBLANK_HTRIM 0
+#endif
+#if PICO_HDMI_VBLANK_HTRIM
+// Genlock 240p raster variant (retimed to look like ordinary NTSC 240p so
+// sinks don't reject the ~59.18 Hz genlock rate); see video_output_rt.c.
+// The app selects this instead of video_mode_240_p only when the user has
+// opted into genlock via the OSD (persisted setting, default off).
+extern const video_mode_t video_mode_240_p_genlock;
+#endif
 extern const video_mode_t video_mode_720_p;
 extern const video_mode_t video_mode_960x720_p;
 extern const video_mode_t video_mode_1024x768_p;
