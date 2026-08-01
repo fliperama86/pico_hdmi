@@ -58,6 +58,15 @@
 #define PICO_HDMI_480P_HSTX_CLK_DIV 1
 #endif
 
+// Same trick for the 240p descriptor. 240p normally runs sys_clk at 126 MHz
+// with a divider of 1, which leaves the CPU only half the per-line cycles that
+// the overclocked 480p mode gets. A consumer that needs 240p scanline headroom
+// (e.g. the 32-bit RGB888 scanout path) runs sys_clk at 252 MHz and defines
+// PICO_HDMI_240P_HSTX_CLK_DIV=2 to hold the pixel clock at 25.2 MHz.
+#ifndef PICO_HDMI_240P_HSTX_CLK_DIV
+#define PICO_HDMI_240P_HSTX_CLK_DIV 1
+#endif
+
 #ifndef PICO_HDMI_ALIGN_DI_BUFFERS
 #define PICO_HDMI_ALIGN_DI_BUFFERS 0
 #endif
@@ -243,7 +252,7 @@ const video_mode_t video_mode_240_p = {
     .v_active_lines = 240,
     .h_total_pixels = 1600,
     .v_total_lines = 262,
-    .hstx_clk_div = 1,
+    .hstx_clk_div = PICO_HDMI_240P_HSTX_CLK_DIV,
     .hstx_csr_clkdiv = 5,
     .hsync_positive = false,
     .vsync_positive = false,
