@@ -36,6 +36,10 @@
 #define PICO_HDMI_LINE_BUFFER_ATTR
 #endif
 
+#ifndef PICO_HDMI_ACTIVE_LINE_DOUBLE_BUFFER
+#define PICO_HDMI_ACTIVE_LINE_DOUBLE_BUFFER 0
+#endif
+
 // With precomposed active lines, the per-line DI builders are only invoked
 // from the background task (one-time header builds), so they need not --
 // and must not, for scratch-budget reasons -- occupy scratch sections.
@@ -68,9 +72,10 @@
 
 // Same mechanism as PICO_HDMI_480P_HSTX_CLK_DIV, for 240p. Default 1 (stock
 // 126 MHz sys_clk -> 25.2 MHz pixel). A consumer overclocking 240p (e.g. 252
-// MHz, to give Core 0's per-pixel conversion more headroom per line) sets
-// this to 2 to keep the pixel clock unchanged (clk_hstx stays 126 MHz; only
-// clk_sys speeds up).
+// MHz, to give Core 0's per-pixel conversion more headroom per line -- the
+// DARK/SHADOW hotfix, or the 32-bit RGB888 scanout path) sets this to 2 to
+// keep the pixel clock unchanged (clk_hstx stays 126 MHz; only clk_sys
+// speeds up).
 #ifndef PICO_HDMI_240P_HSTX_CLK_DIV
 #define PICO_HDMI_240P_HSTX_CLK_DIV 1
 #endif
@@ -411,8 +416,93 @@ volatile uint32_t video_frame_count = 0;
 // DVI mode: when true, disables all HDMI Data Islands (pure DVI output, no audio)
 static bool dvi_mode = false;
 
-// Max active pixels across all modes (1280 for 240p)
+// Max active pixels across all modes (1280 for 240p/720p).
+// FEASIBILITY SPIKE (PICO_HDMI_PIXEL_FORMAT_RGB888, default OFF): one 32-bit
+// RGB888 word per pixel instead of two packed 16-bit RGB565 pixels per word,
+// so the buffer element type/width doubles in bytes (1280 x uint32_t vs
+// 1280 x uint16_t). Element count stays 1280 either way -- it is a pixel
+// count in the RGB888 case and a halfword (2px) count in the RGB565 case.
+#if PICO_HDMI_PIXEL_FORMAT_RGB888
+static uint32_t PICO_HDMI_LINE_BUFFER_ATTR line_buffer[1280] __attribute__((aligned(4)));
+#else
 static uint16_t PICO_HDMI_LINE_BUFFER_ATTR line_buffer[1280] __attribute__((aligned(4)));
+#endif
+
+#if PICO_HDMI_ACTIVE_LINE_DOUBLE_BUFFER
+// ============================================================================
+// Pipelined active-line double buffering (feasibility spike, default OFF).
+//
+// Only engages for the mode descriptor whose v_active_lines==720 (3x
+// vertical scale, e.g. runtime 720p); 2x/4x modes always stay on the single
+// `line_buffer` path above, even when this option is compiled in.
+//
+// While DMA scans db_buffers[db_front_idx] ("front") for the 3 physical
+// lines of one group, the ISR arms ONE deferred fill request (at the
+// group's first physical line) asking for the group 3 lines ahead to be
+// rendered into the other buffer ("back"). Arming happens in
+// video_output_handle_active_start() at the group boundary, but the request
+// is only actually queued (db_fill_pending set, fill IRQ pended) later, from
+// video_output_handle_active_data() for that SAME line -- see db_fill_armed
+// below for why. That fill is serviced from the Core 1 background loop in
+// video_output_core1_run() -- thread context, not this ISR -- so the
+// (expensive) firmware scanline callback gets a full 3-line-period
+// wall-clock budget instead of the single-segment budget every other ISR
+// reprogram is bound to. Group 0 has no prior group to have
+// pipelined it, so it is prefilled synchronously in the ISR during the last
+// back-porch line, at the same single-line budget the non-pipelined path
+// always had (see dma_irq_handler / video_output_prefill_group0()).
+//
+// Second buffer deliberately plain BSS, not PICO_HDMI_LINE_BUFFER_ATTR
+// (scratch_y): at RGB888 each buffer is 1280 x uint32_t = 5120 bytes, and
+// scratch_y is only 4 KB total -- two buffers would not fit.
+#if PICO_HDMI_PIXEL_FORMAT_RGB888
+static uint32_t line_buffer_b[1280] __attribute__((aligned(4)));
+#else
+static uint16_t line_buffer_b[1280] __attribute__((aligned(4)));
+#endif
+static uint32_t *const db_buffers[2] = {(uint32_t *)line_buffer, (uint32_t *)line_buffer_b};
+// True only while the active mode's v_active_lines==720 (set in
+// init_rt_from_mode()); other modes always take the single-buffer path.
+static bool rt_double_buffer_active;
+// Which of db_buffers[] DMA is currently scanning ("front"); updated only at
+// the start of each 3-line group, synchronously in the ISR.
+static uint8_t db_front_idx;
+// Deferred-fill request: armed by the ISR at a group boundary, consumed by
+// video_output_service_double_buffer_fill() from the Core 1 background loop.
+static volatile bool db_fill_pending;
+static uint32_t *db_fill_dst;
+static uint32_t db_fill_v_scanline;
+static uint32_t db_fill_active_line;
+// Set by video_output_handle_active_start() at a group boundary once
+// db_fill_dst/db_fill_v_scanline/db_fill_active_line are stashed, but before
+// it is safe to let anything act on them: at that exact point db_fill_dst
+// (the old front buffer, about to become the new back buffer) is still being
+// drained by the in-flight DATA segment of the group's just-finished last
+// line -- this ISR call always races that DMA transfer, a consequence of the
+// ping-pong DMA scheduling in dma_irq_handler() below (each IRQ reprograms
+// the channel that just finished for the job after next, while the other
+// channel -- already carrying the previous job -- is running concurrently).
+// Arming here instead of queuing directly avoids the fill IRQ overwriting it
+// while DMA is still reading it. video_output_handle_active_data(), called
+// on the very next ISR invocation for the same v_scanline (active_start and
+// active_data always alternate one v_scanline apart by construction), turns
+// an armed request into db_fill_pending + irq_set_pending() once that DATA
+// segment has provably completed. Cleared there, and on resync.
+static bool db_fill_armed;
+// User IRQ that runs the deferred fill promptly, at low priority, instead of
+// waiting for the next Core 1 background-loop iteration. That loop also runs
+// the audio pipeline (polling PIO, SRC, TERC4), whose work items can block
+// for tens of microseconds -- long enough to blow the fill's ~48us budget
+// (fill ~6150 cycles, window 3 lines * 7200 cycles @ 320 MHz = 21600 cycles;
+// start latency > ~15450 cycles misses the swap). A missed fill makes DMA
+// scan a partially-updated buffer left-to-right, matching the observed
+// left-half-biased tearing. Claimed once in video_output_core1_run(); user
+// IRQs are core-local on RP2350 (Cortex-M33 per-core NVIC), so this can't
+// collide with anything Core 0 claims. Priority is set clearly below
+// DMA_IRQ_0 (0, highest) so the scanout ISR always preempts it.
+static uint db_fill_irq_num = (uint)-1;
+#endif // PICO_HDMI_ACTIVE_LINE_DOUBLE_BUFFER
+
 static uint32_t v_scanline = 2;
 static bool vactive_cmdlist_posted = false;
 static bool dma_pong = false;
@@ -619,6 +709,22 @@ static void hstx_resync(void)
     v_scanline = 0;
     vactive_cmdlist_posted = false;
     dma_pong = false;
+#if PICO_HDMI_ACTIVE_LINE_DOUBLE_BUFFER
+    // A resync can interrupt mid-frame: reset the pipelined double-buffer
+    // state too, so the next frame doesn't scan a stale front buffer or
+    // service a fill request queued against the old v_scanline timeline. The
+    // group-0 prefill (dma_irq_handler / video_output_prefill_group0()) always
+    // reruns before the next active_line==0 -- it fires on plain v_scanline
+    // equality once per revolution -- so this just guarantees clean state in
+    // the meantime. db_fill_armed must also be cleared: otherwise a request
+    // armed by handle_active_start just before the resync would still fire
+    // (from the next handle_active_data call after resync) against a
+    // v_scanline timeline, and a db_front_idx, that the reset above just
+    // invalidated.
+    db_front_idx = 0;
+    db_fill_pending = false;
+    db_fill_armed = false;
+#endif
 
     // 5. Clear any pending DMA interrupts
     dma_hw->ints0 = (1U << DMACH_PING) | (1U << DMACH_PONG);
@@ -1156,12 +1262,55 @@ static inline void __scratch_x("")
     } else
 #endif
     {
-        uint32_t *dst32 = (uint32_t *)line_buffer;
-        if (scanline_callback) {
-            scanline_callback(v_scanline, active_line, dst32);
-        } else {
-            for (uint32_t i = 0; i < rt_h_active_pixels / 2; i++) {
-                dst32[i] = 0;
+#if PICO_HDMI_ACTIVE_LINE_DOUBLE_BUFFER
+        if (rt_double_buffer_active) {
+            if ((active_line % 3U) == 0U) {
+                if (active_line != 0U) {
+                    // Group advances: the back buffer (filled ahead of time
+                    // by the background loop) becomes the new front.
+                    db_front_idx = (uint8_t)(db_front_idx ^ 1U);
+                }
+                const uint32_t lookahead = active_line + 3U;
+                if (lookahead < rt_v_active_lines) {
+                    // Stash a deferred fill of the (new) back buffer with the
+                    // NEXT group's content, but do NOT queue it yet: right
+                    // here, db_buffers[db_front_idx ^ 1] (the fill target) is
+                    // still being drained by the in-flight DATA segment of
+                    // the group that just ended -- queuing now would let the
+                    // fill IRQ start overwriting it while DMA is still
+                    // reading it (see db_fill_armed's declaration comment).
+                    // video_output_handle_active_data() turns this into the
+                    // actual db_fill_pending + irq_set_pending() once that
+                    // DATA segment has provably completed. Serviced from the
+                    // Core 1 background loop (thread context), not this ISR,
+                    // so it gets a full 3-line-period budget instead of 1.
+                    db_fill_dst = db_buffers[db_front_idx ^ 1U];
+                    db_fill_v_scanline = rt_blank_head + lookahead;
+                    db_fill_active_line = lookahead;
+                    __compiler_memory_barrier();
+                    db_fill_armed = true;
+                }
+                // else: last group in the frame -- nothing further to prefetch.
+            }
+            // active_line % 3 != 0: the front buffer already holds this
+            // group's content (filled 3 lines-worth of wall clock ago).
+        } else
+#endif
+        {
+            uint32_t *dst32 = (uint32_t *)line_buffer;
+            if (scanline_callback) {
+                scanline_callback(v_scanline, active_line, dst32);
+            } else {
+#if PICO_HDMI_PIXEL_FORMAT_RGB888
+                // One 32-bit RGB888 word per pixel.
+                for (uint32_t i = 0; i < rt_h_active_pixels; i++) {
+                    dst32[i] = 0;
+                }
+#else
+                for (uint32_t i = 0; i < rt_h_active_pixels / 2; i++) {
+                    dst32[i] = 0;
+                }
+#endif
             }
         }
 #if PICO_HDMI_PRECOMPOSED_ACTIVE_LINES
@@ -1300,17 +1449,144 @@ static inline void __scratch_x("")
     }
 }
 
+#if PICO_HDMI_ACTIVE_LINE_DOUBLE_BUFFER
+// Turns an armed group-boundary fill request into the real db_fill_pending +
+// irq_set_pending(). Deliberately out-of-line and __scratch_y (not
+// __scratch_x): SCRATCH_X is shared with the Core 1 stack (.stack1_dummy)
+// and was already within ~12 bytes of its link-time budget before this
+// existed, so the state-transition body -- taken only once per 3-line group
+// (240 times/frame at 720p), never on the other two lines -- is pushed to
+// the roomier scratch_y bank instead. video_output_handle_active_data()
+// keeps only the single flag test that guards the call.
+static void __attribute__((noinline, noclone)) __scratch_y("") db_fill_arm_fire(void)
+{
+    db_fill_armed = false;
+    __compiler_memory_barrier();
+    db_fill_pending = true;
+    // Wake the low-priority fill IRQ immediately rather than waiting for the
+    // next background-loop poll (see db_fill_irq_num / db_fill_irq_handler).
+    irq_set_pending(db_fill_irq_num);
+}
+#endif
+
 static inline void __scratch_x("") video_output_handle_active_data(dma_channel_hw_t *ch)
 {
 #if PICO_HDMI_PRECOMPOSED_ACTIVE_LINES
     ch->read_addr = (uintptr_t)active_data_ptr;
+#elif PICO_HDMI_ACTIVE_LINE_DOUBLE_BUFFER
+    ch->read_addr = rt_double_buffer_active ? (uintptr_t)db_buffers[db_front_idx] : (uintptr_t)line_buffer;
 #else
     ch->read_addr = (uintptr_t)line_buffer;
 #endif
+#if PICO_HDMI_PIXEL_FORMAT_RGB888
+    // RGB888 feasibility spike: one 32-bit word per pixel, no packing.
+    ch->transfer_count = rt_h_active_pixels;
+#else
     // 32-bit mode: h_active/2 words of pre-expanded pixel pairs. Native
     // 16-bit mode: the same count as halfword transfers, bus-replicated.
     ch->transfer_count = (rt_h_active_pixels * sizeof(uint16_t)) / sizeof(uint32_t);
+#endif
+#if PICO_HDMI_ACTIVE_LINE_DOUBLE_BUFFER
+    // By ping-pong construction, this call always runs exactly one ISR
+    // invocation after the video_output_handle_active_start() that armed a
+    // group-boundary fill (active_start/active_data for a given line always
+    // fire on consecutive ISR calls, one v_scanline apart) -- i.e. right as
+    // the DATA segment this very call is about to reprogram AWAY FROM (the
+    // group's just-finished last line, occupying the fill's target buffer)
+    // has provably completed. That makes this the first safe point to
+    // publish db_fill_pending and wake the fill IRQ. Non-group lines pay one
+    // flag test (the state transition itself lives in the out-of-line,
+    // scratch_y db_fill_arm_fire() -- see its declaration comment).
+    if (db_fill_armed) {
+        db_fill_arm_fire();
+    }
+#endif
 }
+
+#if PICO_HDMI_ACTIVE_LINE_DOUBLE_BUFFER
+// Fill db_buffers[0] with the first group's content (active_line 0),
+// synchronously in the ISR, during the last back-porch line -- there is no
+// prior group to have pipelined it ahead of time. This runs once per frame,
+// at the same per-line budget the non-pipelined path always had; every other
+// group gets the full 3-line-period budget via the deferred path below.
+// Must run after video_pipeline_vsync_callback() has latched the new frame's
+// ring start: that callback fires earlier, at v_scanline==rt_v_front_porch
+// (see video_output_handle_vsync()), well before this (the last back-porch
+// line), so group 0 reads the right frame's data.
+static void __scratch_x("") video_output_prefill_group0(void)
+{
+    db_front_idx = 0;
+    db_fill_pending = false;
+    uint32_t *dst32 = db_buffers[0];
+    if (scanline_callback) {
+        scanline_callback(rt_blank_head, 0, dst32);
+    } else {
+#if PICO_HDMI_PIXEL_FORMAT_RGB888
+        for (uint32_t i = 0; i < rt_h_active_pixels; i++) {
+            dst32[i] = 0;
+        }
+#else
+        for (uint32_t i = 0; i < rt_h_active_pixels / 2; i++) {
+            dst32[i] = 0;
+        }
+#endif
+    }
+}
+
+// Consume a deferred fill request queued by the ISR at a group boundary.
+// Called from two contexts on the same core: the low-priority db_fill_irq_num
+// IRQ (db_fill_irq_handler, below) -- the normal path, entered almost
+// immediately after dma_irq_handler sets db_fill_pending and marks the IRQ
+// pending -- and, as a belt-and-suspenders fallback, the Core 1 background
+// loop in video_output_core1_run(). Either caller CAN be interrupted
+// (repeatedly) by dma_irq_handler without missing any ISR deadline, since
+// none of the fast per-segment ISR reprograms call into this. It only needs
+// to finish before the group it is filling becomes the front buffer, ~3
+// line-periods away.
+static void video_output_service_double_buffer_fill(void)
+{
+    // Test-and-clear must be atomic across the two calling contexts above:
+    // a plain "if (pending) { pending = false; ... }" could let the IRQ
+    // interrupt the background-loop call between the check and the clear,
+    // and both would then service (and clear) the same request. Same-core,
+    // so a short critical section is enough -- no spinlock needed.
+    uint32_t irq_state = save_and_disable_interrupts();
+    bool pending = db_fill_pending;
+    db_fill_pending = false;
+    restore_interrupts(irq_state);
+    if (!pending) {
+        return;
+    }
+    __compiler_memory_barrier();
+    uint32_t *dst32 = db_fill_dst;
+    const uint32_t v = db_fill_v_scanline;
+    const uint32_t al = db_fill_active_line;
+    if (scanline_callback) {
+        scanline_callback(v, al, dst32);
+    } else {
+#if PICO_HDMI_PIXEL_FORMAT_RGB888
+        for (uint32_t i = 0; i < rt_h_active_pixels; i++) {
+            dst32[i] = 0;
+        }
+#else
+        for (uint32_t i = 0; i < rt_h_active_pixels / 2; i++) {
+            dst32[i] = 0;
+        }
+#endif
+    }
+}
+
+// Exclusive handler for db_fill_irq_num. Runs the deferred fill in IRQ
+// context at low priority (below DMA_IRQ_0) -- which is the pre-double-buffer
+// calling convention for the firmware scanline callback (it always ran from
+// dma_irq_handler before this pipelining existed), so this is a return to
+// known-safe territory for that callback, not new ground: no locks, no
+// blocking calls, LUT reads + stores only, under RGB888.
+static void db_fill_irq_handler(void)
+{
+    video_output_service_double_buffer_fill();
+}
+#endif // PICO_HDMI_ACTIVE_LINE_DOUBLE_BUFFER
 
 // ============================================================================
 // DMA IRQ Handler
@@ -1361,6 +1637,11 @@ static void __scratch_x("") dma_irq_handler()
         video_output_handle_active_data(ch);
         vactive_cmdlist_posted = false;
     } else {
+#if PICO_HDMI_ACTIVE_LINE_DOUBLE_BUFFER
+        if (rt_double_buffer_active && v_scanline == (uint32_t)(rt_blank_head - 1)) {
+            video_output_prefill_group0();
+        }
+#endif
         video_output_handle_blanking(ch, v_scanline, state.send_acr, dma_pong);
     }
     if (!vactive_cmdlist_posted) {
@@ -1472,6 +1753,12 @@ static void init_rt_from_mode(const video_mode_t *mode)
     rt_blank_head = (uint16_t)(rt_vsync_end + rt_v_back_porch);
     rt_active_end = (uint32_t)rt_blank_head + rt_v_active_lines;
     rt_sync_after_di = mode->data_island_in_hsync ? mode->h_sync_width - W_PREAMBLE - W_DATA_ISLAND : 0;
+#if PICO_HDMI_ACTIVE_LINE_DOUBLE_BUFFER
+    // Gated on the mode descriptor, not a firmware "3x" concept the library
+    // doesn't know about: only the 720p-class mode (v_active_lines==720) is
+    // pipelined. 2x (480p) and 4x (240p) always take the single-buffer path.
+    rt_double_buffer_active = (mode->v_active_lines == 720U);
+#endif
 }
 
 static void build_all_command_lists(const video_mode_t *mode)
@@ -1651,6 +1938,22 @@ void video_output_set_vsync_callback(video_output_vsync_cb_t cb)
 void video_output_core1_run(void)
 {
     // HSTX Hardware Setup
+#if PICO_HDMI_PIXEL_FORMAT_RGB888
+    // FEASIBILITY SPIKE: one 32-bit 0x00RRGGBB word per pixel (RP2350
+    // datasheet Sec 12.11). NBITS=7 encodes 8 valid bits per lane; lane
+    // assignment stays L0=blue, L1=green, L2=red. Each lane's NBITS bits end
+    // at bit 7 of its right-rotated word, so for 0x00RRGGBB: L0 (bits 7:0)
+    // ROT=0, L1 (bits 15:8) ROT=8, L2 (bits 23:16) ROT=16.
+    hstx_ctrl_hw->expand_tmds = 7 << HSTX_CTRL_EXPAND_TMDS_L2_NBITS_LSB | 16 << HSTX_CTRL_EXPAND_TMDS_L2_ROT_LSB |
+                                7 << HSTX_CTRL_EXPAND_TMDS_L1_NBITS_LSB | 8 << HSTX_CTRL_EXPAND_TMDS_L1_ROT_LSB |
+                                7 << HSTX_CTRL_EXPAND_TMDS_L0_NBITS_LSB | 0 << HSTX_CTRL_EXPAND_TMDS_L0_ROT_LSB;
+
+    // One pixel per FIFO word: ENC_N_SHIFTS=1, ENC_SHIFT=0. RAW_ fields are
+    // for control-symbol (Data Island) words and are unchanged.
+    hstx_ctrl_hw->expand_shift =
+        1 << HSTX_CTRL_EXPAND_SHIFT_ENC_N_SHIFTS_LSB | 0 << HSTX_CTRL_EXPAND_SHIFT_ENC_SHIFT_LSB |
+        1 << HSTX_CTRL_EXPAND_SHIFT_RAW_N_SHIFTS_LSB | 0 << HSTX_CTRL_EXPAND_SHIFT_RAW_SHIFT_LSB;
+#else
     hstx_ctrl_hw->expand_tmds = 4 << HSTX_CTRL_EXPAND_TMDS_L2_NBITS_LSB | 8 << HSTX_CTRL_EXPAND_TMDS_L2_ROT_LSB |
                                 5 << HSTX_CTRL_EXPAND_TMDS_L1_NBITS_LSB | 3 << HSTX_CTRL_EXPAND_TMDS_L1_ROT_LSB |
                                 4 << HSTX_CTRL_EXPAND_TMDS_L0_NBITS_LSB | 29 << HSTX_CTRL_EXPAND_TMDS_L0_ROT_LSB;
@@ -1658,7 +1961,12 @@ void video_output_core1_run(void)
     hstx_ctrl_hw->expand_shift =
         2 << HSTX_CTRL_EXPAND_SHIFT_ENC_N_SHIFTS_LSB | 16 << HSTX_CTRL_EXPAND_SHIFT_ENC_SHIFT_LSB |
         1 << HSTX_CTRL_EXPAND_SHIFT_RAW_N_SHIFTS_LSB | 0 << HSTX_CTRL_EXPAND_SHIFT_RAW_SHIFT_LSB;
+#endif
 
+    // NOTE: csr.N_SHIFTS/SHIFT below govern the TMDS *output* side (3 lanes x
+    // 10-bit symbols, 2 raw bits shifted out per HSTX clock in DDR) and are
+    // independent of expand_tmds/expand_shift, which govern the *input* pixel
+    // expansion feeding the TMDS encoder. Do not change csr for pixel format.
     hstx_ctrl_hw->csr = 0;
     hstx_ctrl_hw->csr = HSTX_CTRL_CSR_EXPAND_EN_BITS |
                         (uint32_t)video_output_active_mode->hstx_csr_clkdiv << HSTX_CTRL_CSR_CLKDIV_LSB |
@@ -1693,6 +2001,18 @@ void video_output_core1_run(void)
     irq_set_priority(DMA_IRQ_0, 0);
     irq_set_enabled(DMA_IRQ_0, true);
 
+#if PICO_HDMI_ACTIVE_LINE_DOUBLE_BUFFER
+    // Deferred-fill IRQ (see db_fill_irq_num / db_fill_irq_handler above).
+    // Claimed once per Core 1 launch. Priority 0xC0 is strictly below
+    // DMA_IRQ_0's 0 (numerically lower = higher priority on this NVIC), so
+    // DMA_IRQ_0 always preempts it, but it still beats waiting for the next
+    // background-loop poll.
+    db_fill_irq_num = (uint)user_irq_claim_unused(true);
+    irq_set_exclusive_handler(db_fill_irq_num, db_fill_irq_handler);
+    irq_set_priority(db_fill_irq_num, 0xC0);
+    irq_set_enabled(db_fill_irq_num, true);
+#endif
+
     bus_ctrl_hw->priority = BUSCTRL_BUS_PRIORITY_DMA_W_BITS | BUSCTRL_BUS_PRIORITY_DMA_R_BITS;
     dma_channel_start(DMACH_PING);
 
@@ -1719,6 +2039,13 @@ void video_output_core1_run(void)
             hstx_resync();
             irq_set_enabled(DMA_IRQ_0, true);
         }
+
+#if PICO_HDMI_ACTIVE_LINE_DOUBLE_BUFFER
+        // Service any pending pipelined-scanout fill request before the
+        // (firmware-supplied) background_task(), so it isn't starved by
+        // whatever that does.
+        video_output_service_double_buffer_fill();
+#endif
 
         if (background_task) {
             background_task();
