@@ -257,49 +257,65 @@ const video_mode_t video_mode_480_p = {
 const video_mode_t video_mode_240_p = {
     .h_front_porch = 32,
     .h_sync_width = 192,
-#if PICO_HDMI_VBLANK_HTRIM
-    // Genlock: hardware testing showed the elastic/uniform htrim trim
-    // distribution was never the cause of the 240p artifact (byte-identical
-    // symptom across broken-trim, uniform-trim, and elastic-trim builds).
-    // Root cause: the ORIGINAL 1600x262 base raster, once genlock stretches
-    // v_total up to ~266, is a nonstandard raster (real 240p is 262/263
-    // lines at ~15.7 kHz H) that falls outside the window sinks key 240p
-    // detection on. Fix: retime the base mode itself to look like ordinary
-    // NTSC 240p: 1613 x 264 @ 25.2 MHz = 59.178 Hz, H = 15.62 kHz --
-    // numerically the MVS's own raster (264 lines, ~64.0 us/line) -- without
-    // needing to stretch v_total beyond standard. Residual vs the 59.1856 Hz
-    // MVS source is +2.1 us/frame, well inside uniform htrim (~-2 px), so
-    // elastic single-line trim (htrim_elastic_mode) is retired/dormant.
-    .h_back_porch = 109,
-#else
     .h_back_porch = 96,
-#endif
     .h_active_pixels = 1280,
     .v_front_porch = 4,
     .v_sync_width = 4,
-#if PICO_HDMI_VBLANK_HTRIM
-    .v_back_porch = 16,
-#else
     .v_back_porch = 14,
-#endif
     .v_active_lines = 240,
-#if PICO_HDMI_VBLANK_HTRIM
-    .h_total_pixels = 1613,
-    .v_total_lines = 264,
-#else
     .h_total_pixels = 1600,
     .v_total_lines = 262,
-#endif
     // Pixel = sys_clk / (hstx_clk_div * hstx_csr_clkdiv); 1*5 -> 25.2 MHz at
     // the stock 126 MHz. A consumer overclocking 240p (e.g. 252 MHz, same
     // reasoning as 480p above) defines PICO_HDMI_240P_HSTX_CLK_DIV=2 to keep
     // pixel/signal identical (clk_hstx stays 126 MHz; only clk_sys speeds up).
+    // Unconditional (not genlock-specific): this is the standard-timing 240p
+    // descriptor, used whenever genlock is off (default) or not built.
     .hstx_clk_div = PICO_HDMI_240P_HSTX_CLK_DIV,
     .hstx_csr_clkdiv = 5,
     .hsync_positive = false,
     .vsync_positive = false,
     .data_island_in_hsync = true,
 };
+
+#if PICO_HDMI_VBLANK_HTRIM
+// Genlock 240p raster variant: retimed to look like ordinary NTSC 240p so
+// sinks classify it as standard 240p instead of rejecting a nonstandard
+// raster. Hardware testing showed the elastic/uniform htrim trim
+// distribution was never the cause of the plain-stretched-vtotal 240p
+// artifact (byte-identical symptom across broken-trim, uniform-trim, and
+// elastic-trim builds). Root cause: the STANDARD 1600x262 base raster, once
+// genlock stretches v_total up to ~266, is a nonstandard raster (real 240p
+// is 262/263 lines at ~15.7 kHz H) that falls outside the window sinks key
+// 240p detection on. Fix: a separate, retimed base mode that looks like
+// ordinary NTSC 240p: 1613 x 264 @ 25.2 MHz = 59.178 Hz, H = 15.62 kHz --
+// numerically the MVS's own raster (264 lines, ~64.0 us/line) -- without
+// needing to stretch v_total beyond standard. Residual vs the 59.1856 Hz
+// MVS source is +2.1 us/frame, well inside uniform htrim (~-2 px), so
+// elastic single-line trim (htrim_elastic_mode) is retired/dormant.
+//
+// Selected by the app in place of video_mode_240_p only when the user has
+// explicitly opted into genlock via the OSD (persisted setting, default
+// off) -- see video_output_rt.h and the app's video_output_mode_for_reboot_mode().
+const video_mode_t video_mode_240_p_genlock = {
+    .h_front_porch = 32,
+    .h_sync_width = 192,
+    .h_back_porch = 109,
+    .h_active_pixels = 1280,
+    .v_front_porch = 4,
+    .v_sync_width = 4,
+    .v_back_porch = 16,
+    .v_active_lines = 240,
+    .h_total_pixels = 1613,
+    .v_total_lines = 264,
+    // Same 252 MHz DARK/SHADOW-load hotfix as video_mode_240_p above.
+    .hstx_clk_div = PICO_HDMI_240P_HSTX_CLK_DIV,
+    .hstx_csr_clkdiv = 5,
+    .hsync_positive = false,
+    .vsync_positive = false,
+    .data_island_in_hsync = true,
+};
+#endif
 
 // Exact-clock 1280x720 CVT reduced blanking. The normal runtime firmware uses
 // a 320 MHz system/HSTX clock, so CSR /5 gives an exact 64 MHz pixel clock.
@@ -1014,10 +1030,11 @@ static int16_t htrim_px;
 // htrim_elastic_mode = false unconditionally). Hardware testing showed the
 // 240p artifact was byte-identical across broken-trim, uniform-trim, and
 // elastic-trim builds -- trim distribution was never the cause. Root cause
-// was the nonstandard 266-line genlock raster; the fix was retiming
-// video_mode_240_p's base raster to 1613x264 (see its definition above), at
-// which uniform trim is only ~2 px and this machinery is unnecessary. Kept
-// compiled (not deleted) for possible future reuse.
+// was the nonstandard 266-line genlock raster; the fix was a separate,
+// retimed video_mode_240_p_genlock raster (1613x264, see its definition
+// above) selected instead of video_mode_240_p when the user opts into
+// genlock, at which uniform trim is only ~2 px and this machinery is
+// unnecessary. Kept compiled (not deleted) for possible future reuse.
 //
 // Original rationale, kept for reference: at 240p the blanking region is
 // only ~22-24 lines (vs. ~52 at 480p / more at 720p); spreading a uniform
@@ -1779,10 +1796,11 @@ static void build_all_command_lists(const video_mode_t *mode)
     // Retired on hardware evidence: elastic single-line trim did not fix the
     // 240p artifact (symptom was byte-identical across broken-trim,
     // uniform-trim, and elastic-trim builds), so trim distribution was never
-    // the cause -- the nonstandard genlock raster was (see video_mode_240_p
-    // above, now retimed to 1613x264). Uniform trim at the retimed raster is
-    // ~2 px, sub-threshold, so 240p reverts to the same uniform-trim path as
-    // 480p/720p. Machinery kept compiled but dormant for possible reuse.
+    // the cause -- the nonstandard genlock raster was (see the separate,
+    // retimed video_mode_240_p_genlock, 1613x264, above). Uniform trim at
+    // that raster is ~2 px, sub-threshold, so 240p reverts to the same
+    // uniform-trim path as 480p/720p. Machinery kept compiled but dormant
+    // for possible reuse.
     htrim_elastic_mode = false;
     if (htrim_elastic_mode) {
         htrim_elastic_scanline = 1; // see line-map comment above htrim_elastic_mode
