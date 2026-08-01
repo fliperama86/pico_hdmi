@@ -13,6 +13,15 @@ option(PICO_HDMI_EXPLICIT_AUDIO_CHANNEL_STATUS
 # backend; the compile-time video_output.c backend is untouched.
 option(PICO_HDMI_PIXEL_FORMAT_RGB888
     "EXPERIMENTAL: active-line HSTX scanout uses one 32-bit RGB888 word per pixel instead of packed RGB565" OFF)
+# FEASIBILITY SPIKE (default OFF): pipeline the active-line scanout for the
+# mode whose v_active_lines==720 (3x vertical scale, e.g. runtime 720p)
+# across two line buffers. The ISR only swaps a front/back index and queues a
+# deferred fill request at each 3-line group boundary; the actual (expensive)
+# scanline callback runs from the Core 1 background loop (thread context, not
+# the ISR), so it gets a full 3-line-period budget instead of 1. Other modes
+# (2x/4x) are unaffected even when this is on. See video_output_rt.c.
+option(PICO_HDMI_ACTIVE_LINE_DOUBLE_BUFFER
+    "EXPERIMENTAL: pipeline the 3x (720p-class) active-line scanout across two buffers, decoupling the scanline callback from the per-line ISR deadline" OFF)
 set(PICO_HDMI_HSTX_CLK_DIV "" CACHE STRING "Override MODE_HSTX_CLK_DIV; empty keeps mode default")
 
 if(PICO_HDMI_RUNTIME_MODES)
@@ -62,4 +71,8 @@ endif()
 
 if(PICO_HDMI_RT_RUNTIME_MODE_ATTRS)
     target_compile_definitions(pico_hdmi PRIVATE PICO_HDMI_RT_RUNTIME_MODE_ATTRS=1)
+endif()
+
+if(PICO_HDMI_ACTIVE_LINE_DOUBLE_BUFFER)
+    target_compile_definitions(pico_hdmi PRIVATE PICO_HDMI_ACTIVE_LINE_DOUBLE_BUFFER=1)
 endif()
