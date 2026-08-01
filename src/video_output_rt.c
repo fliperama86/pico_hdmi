@@ -51,6 +51,14 @@
 #define PICO_HDMI_LEGACY_240P_AVI_INFOFRAME 0
 #endif
 
+// Elastic-blanking htrim registration/patching (see htrim_register_all() and
+// video_output_set_vblank_htrim_px()). Off by default: in the default
+// (non-genlock) build, scratch_x is exactly full, so no new code may reach
+// any __scratch_x/__scratch_y function unless this is explicitly enabled.
+#ifndef PICO_HDMI_VBLANK_HTRIM
+#define PICO_HDMI_VBLANK_HTRIM 0
+#endif
+
 // HSTX clock divider for the 480p mode descriptor. Default 1 (stock 126 MHz
 // sys_clk -> 25.2 MHz pixel). A consumer overclocking 480p (e.g. 252 MHz for
 // scanline-IRQ headroom) sets this to 2 to keep the pixel clock unchanged.
@@ -244,14 +252,39 @@ const video_mode_t video_mode_480_p = {
 const video_mode_t video_mode_240_p = {
     .h_front_porch = 32,
     .h_sync_width = 192,
+#if PICO_HDMI_VBLANK_HTRIM
+    // Genlock: hardware testing showed the elastic/uniform htrim trim
+    // distribution was never the cause of the 240p artifact (byte-identical
+    // symptom across broken-trim, uniform-trim, and elastic-trim builds).
+    // Root cause: the ORIGINAL 1600x262 base raster, once genlock stretches
+    // v_total up to ~266, is a nonstandard raster (real 240p is 262/263
+    // lines at ~15.7 kHz H) that falls outside the window sinks key 240p
+    // detection on. Fix: retime the base mode itself to look like ordinary
+    // NTSC 240p: 1613 x 264 @ 25.2 MHz = 59.178 Hz, H = 15.62 kHz --
+    // numerically the MVS's own raster (264 lines, ~64.0 us/line) -- without
+    // needing to stretch v_total beyond standard. Residual vs the 59.1856 Hz
+    // MVS source is +2.1 us/frame, well inside uniform htrim (~-2 px), so
+    // elastic single-line trim (htrim_elastic_mode) is retired/dormant.
+    .h_back_porch = 109,
+#else
     .h_back_porch = 96,
+#endif
     .h_active_pixels = 1280,
     .v_front_porch = 4,
     .v_sync_width = 4,
+#if PICO_HDMI_VBLANK_HTRIM
+    .v_back_porch = 16,
+#else
     .v_back_porch = 14,
+#endif
     .v_active_lines = 240,
+#if PICO_HDMI_VBLANK_HTRIM
+    .h_total_pixels = 1613,
+    .v_total_lines = 264,
+#else
     .h_total_pixels = 1600,
     .v_total_lines = 262,
+#endif
     // Pixel = sys_clk / (hstx_clk_div * hstx_csr_clkdiv); 1*5 -> 25.2 MHz at
     // the stock 126 MHz. A consumer overclocking 240p (e.g. 252 MHz, same
     // reasoning as 480p above) defines PICO_HDMI_240P_HSTX_CLK_DIV=2 to keep
@@ -473,6 +506,14 @@ static uint32_t vblank_di_ping[128] HSTX_CMDLIST_ATTR;
 static uint32_t vblank_di_pong[128] HSTX_CMDLIST_ATTR;
 static uint32_t vblank_di_null[128] HSTX_CMDLIST_ATTR;
 static uint32_t vblank_di_len, vblank_di_null_len;
+
+#if PICO_HDMI_VBLANK_HTRIM
+// 240p elastic single-line vblank trim template: a private copy of
+// vblank_di_null whose tail RAW_REPEAT word alone carries the whole frame's
+// htrim correction at 240p (see htrim_elastic_mode below).
+static uint32_t vblank_elastic[128] HSTX_CMDLIST_ATTR;
+static uint32_t vblank_elastic_len;
+#endif
 
 static uint32_t vblank_acr_vsync_on[64] HSTX_CMDLIST_ATTR;
 static uint32_t vblank_acr_vsync_off[64] HSTX_CMDLIST_ATTR;
@@ -852,39 +893,106 @@ void video_output_perf_probe_read(uint32_t *fifo_min, uint32_t *irq_gap_max_us)
 }
 
 #define HTRIM_MAX_SLOTS 16
-#define HTRIM_MIN_BIG_REPEAT 1200
-#define HTRIM_MAX_BIG_REPEAT 1600
 #define HTRIM_LIMIT_PX 30
 static uint32_t *htrim_word[HTRIM_MAX_SLOTS];
 static uint16_t htrim_base[HTRIM_MAX_SLOTS];
 static uint8_t htrim_slots;
 static int16_t htrim_px;
 
-static void htrim_register(uint32_t *buf, uint32_t len)
+#if PICO_HDMI_VBLANK_HTRIM
+// ============================================================================
+// 240p elastic single-line vblank trim (see video_output_set_vblank_htrim_px()
+// and video_output_handle_blanking()).
+//
+// STATUS: RETIRED / DORMANT (see build_all_command_lists(), which now forces
+// htrim_elastic_mode = false unconditionally). Hardware testing showed the
+// 240p artifact was byte-identical across broken-trim, uniform-trim, and
+// elastic-trim builds -- trim distribution was never the cause. Root cause
+// was the nonstandard 266-line genlock raster; the fix was retiming
+// video_mode_240_p's base raster to 1613x264 (see its definition above), at
+// which uniform trim is only ~2 px and this machinery is unnecessary. Kept
+// compiled (not deleted) for possible future reuse.
+//
+// Original rationale, kept for reference: at 240p the blanking region is
+// only ~22-24 lines (vs. ~52 at 480p / more at 720p); spreading a uniform
+// +-px trim across every one of them creates a visible H-period sawtooth
+// that some sinks' H-PLL tracks (bottom-half image bounce, confirmed on
+// hardware even through a re-timing scaler). Concentrating the whole
+// per-frame correction (px * blank-line count) into ONE ordinary-blanking
+// line instead keeps every other blanking line at exactly h_total px.
+//
+// 240p line map (retimed nominal rt_v_total_lines = 264; see
+// get_scanline_state()):
+//   v_scanline 0          -> AVI infoframe (video_output_handle_blanking() v_scanline==0 branch)
+//   v_scanline 1..3       -> ordinary blanking (front-porch tail)  <- elastic line = 1
+//   v_scanline 4..7       -> vsync (video_output_handle_vsync(), ACR-on / plain vsync)
+//   v_scanline 8,12,16,20 -> ACR (back porch, send_acr)
+//   v_scanline 9..23 (non-ACR) -> ordinary blanking (back porch)
+//   v_scanline 24..263    -> active video
+// Line 1 is the first ordinary-blanking line after active video (line 0 is
+// reserved for the AVI infoframe) and is visited every frame regardless of
+// the genlock's runtime +-1 rt_v_total_lines step: wraparound always revisits
+// v_scanline 0..3 first (see dma_irq_handler()'s wrap logic), independent of
+// where the genlock's extra/missing line lands at the bottom of the frame.
+// ============================================================================
+static bool htrim_elastic_mode;
+static uint16_t htrim_elastic_scanline;
+static uint16_t htrim_elastic_gain; // = mode->v_total_lines - mode->v_active_lines
+static int32_t htrim_elastic_total; // = htrim_px * htrim_elastic_gain
+static uint16_t htrim_elastic_base; // vblank_elastic's tail count before patching
+#endif
+
+// `slots` is a caller-owned counter, NOT the published `htrim_slots`: this
+// lets htrim_register_all() build the whole table into htrim_word/htrim_base
+// while `htrim_slots` (read by video_output_set_vblank_htrim_px(), which can
+// race in from the vsync callback) stays at its old, fully-valid value until
+// the rebuild is complete -- see htrim_register_all().
+static void htrim_register(uint32_t *buf, uint32_t len, uint8_t *slots)
 {
-    for (uint32_t i = 0; i < len && htrim_slots < HTRIM_MAX_SLOTS; i++) {
+    // Mode-derived match window: the trailing "big repeat" segment of a
+    // blanking line always carries the bulk of the line (back porch, plus
+    // active pixels for non-active templates), so it is always > half a
+    // line and always < one full line. A fixed 1200-1600 px window only
+    // ever matched the (now-deleted) 720p timing; at 480p the big repeat is
+    // 688 px and never matched, silently disabling the whole servo.
+    const uint32_t rt_h_total =
+        (uint32_t)rt_h_front_porch + rt_h_sync_width + rt_h_back_porch + rt_h_active_pixels;
+    for (uint32_t i = 0; i < len && *slots < HTRIM_MAX_SLOTS; i++) {
         const uint32_t count = buf[i] & 0xFFFU;
-        if ((buf[i] >> 12) == 0x1 && count >= HTRIM_MIN_BIG_REPEAT && count <= HTRIM_MAX_BIG_REPEAT) {
-            htrim_word[htrim_slots] = &buf[i];
-            htrim_base[htrim_slots] = (uint16_t)(buf[i] & 0xFFFU);
-            htrim_slots++;
+        if ((buf[i] >> 12) == 0x1 && count >= (rt_h_total / 2) && count < rt_h_total) {
+            htrim_word[*slots] = &buf[i];
+            htrim_base[*slots] = (uint16_t)(buf[i] & 0xFFFU);
+            (*slots)++;
         }
     }
 }
 
 static void htrim_register_all(void)
 {
+    // Preserve whatever trim the servo already applied: this function is
+    // re-invoked mid-stream (build_all_command_lists(), video_output_update_acr())
+    // whenever templates are rebuilt, and a rebuild must not reset the servo
+    // to zero mid-genlock.
+    const int prev_px = htrim_px;
     htrim_slots = 0;
     htrim_px = 0;
-    htrim_register(vblank_line_vsync_off, 9);
-    htrim_register(vblank_line_vsync_on, 9);
-    htrim_register(vblank_acr_vsync_on, vblank_acr_vsync_on_len);
-    htrim_register(vblank_acr_vsync_off, vblank_acr_vsync_off_len);
-    htrim_register(vblank_infoframe_vsync_on, vblank_infoframe_vsync_on_len);
-    htrim_register(vblank_infoframe_vsync_off, vblank_infoframe_vsync_off_len);
-    htrim_register(vblank_avi_infoframe, vblank_avi_infoframe_len);
-    htrim_register(genlock_acr_vsync_on, genlock_acr_vsync_on_len);
-    htrim_register(genlock_acr_vsync_off, genlock_acr_vsync_off_len);
+    uint8_t slots = 0;
+    htrim_register(vblank_line_vsync_off, 9, &slots);
+    htrim_register(vblank_line_vsync_on, 9, &slots);
+    htrim_register(vblank_acr_vsync_on, vblank_acr_vsync_on_len, &slots);
+    htrim_register(vblank_acr_vsync_off, vblank_acr_vsync_off_len, &slots);
+    htrim_register(vblank_infoframe_vsync_on, vblank_infoframe_vsync_on_len, &slots);
+    htrim_register(vblank_infoframe_vsync_off, vblank_infoframe_vsync_off_len, &slots);
+    htrim_register(vblank_avi_infoframe, vblank_avi_infoframe_len, &slots);
+    htrim_register(genlock_acr_vsync_on, genlock_acr_vsync_on_len, &slots);
+    htrim_register(genlock_acr_vsync_off, genlock_acr_vsync_off_len, &slots);
+#if PICO_HDMI_VBLANK_HTRIM
+    // vblank_di_null is the silent-vblank line actually posted by the
+    // non-precomposed HDMI path (video_output_handle_blanking()) whenever no
+    // audio packet is pending; its tail repeat must track the servo too, or
+    // silent lines fall back to the untrimmed period.
+    htrim_register(vblank_di_null, vblank_di_null_len, &slots);
+#endif
 #if PICO_HDMI_PRECOMPOSED_ACTIVE_LINES
     // The DI vblank templates are persistent in precomposed mode (the ISR
     // patches island words in place, never the tail repeat) and MUST be
@@ -894,11 +1002,20 @@ static void htrim_register_all(void)
     // Uniform trim removes the alternation and triples the authority.
     // False positives are impossible: TERC4 payload words always carry
     // high bits (3x10-bit lanes), so they can never match a bare
-    // RAW_REPEAT command in the 1200-1600 px window.
-    htrim_register(vblank_di_ping, precomposed_vblank_len);
-    htrim_register(vblank_di_pong, precomposed_vblank_len);
-    htrim_register(vblank_di_null, vblank_di_null_len);
+    // RAW_REPEAT command in the matched window.
+    htrim_register(vblank_di_ping, precomposed_vblank_len, &slots);
+    htrim_register(vblank_di_pong, precomposed_vblank_len, &slots);
+    htrim_register(vblank_di_null, vblank_di_null_len, &slots);
 #endif
+    // Publish the rebuilt table atomically: __dmb() orders the htrim_word/
+    // htrim_base writes above ahead of the htrim_slots publish below, so a
+    // concurrent video_output_set_vblank_htrim_px() either still sees the old
+    // (small, valid) slot count or the new one -- never a torn table.
+    __dmb();
+    htrim_slots = slots;
+    if (prev_px) {
+        video_output_set_vblank_htrim_px(prev_px);
+    }
 }
 
 int video_output_get_vblank_htrim_slots(void)
@@ -923,6 +1040,21 @@ void video_output_set_vblank_htrim_px(int px)
     if ((int16_t)px == htrim_px)
         return;
     htrim_px = (int16_t)px;
+#if PICO_HDMI_VBLANK_HTRIM
+    if (htrim_elastic_mode) {
+        // 240p: the whole frame's correction lands on ONE line (see the
+        // elastic-mode comment above) instead of being spread across every
+        // registered template -- do not touch htrim_word[]/htrim_base[], so
+        // all other blanking templates stay at their untrimmed base count.
+        // 109 (h_back_porch) + 1280 (h_active_pixels) + 30 (HTRIM_LIMIT_PX) *
+        // 24 (retimed 240p blank-line count, v_total 264 - v_active 240) =
+        // 2109, well inside the RAW_REPEAT 12-bit count field (max 4095).
+        htrim_elastic_total = (int32_t)htrim_px * (int32_t)htrim_elastic_gain;
+        vblank_elastic[vblank_elastic_len - 3] =
+            (0x1U << 12) | (uint32_t)((int32_t)htrim_elastic_base + htrim_elastic_total);
+        return;
+    }
+#endif
     for (uint32_t i = 0; i < htrim_slots; i++) {
         *htrim_word[i] = (0x1U << 12) | (uint32_t)(htrim_base[i] + px);
     }
@@ -1126,11 +1258,42 @@ static inline void __scratch_x("")
             if (di_words) {
                 uint32_t *buf = dma_pong ? vblank_di_ping : vblank_di_pong;
                 vblank_di_len = BUILD_LINE_WITH_DI(buf, di_words, false, false);
+#if PICO_HDMI_VBLANK_HTRIM
+                // This line is freshly built every call (unlike the static
+                // templates htrim_register_all() patches directly), so its
+                // tail repeat starts back at the untrimmed base count. Apply
+                // the current servo trim here too, or every DI-bearing
+                // vblank line reverts to the untrimmed period, producing an
+                // H-period sawtooth versus the trimmed silent/template
+                // lines. Tail is always the last 3 words for both
+                // build_line_with_di() and build_line_with_di_backporch()
+                // when active==false: [RAW_REPEAT|count, sync, NOP].
+                //
+                // 240p elastic mode: only the single designated line carries
+                // the (much larger) whole-frame correction; every other
+                // ordinary-blanking line -- including dynamically-built
+                // audio-DI lines -- stays untouched at its base period.
+                if (htrim_elastic_mode) {
+                    if (v_scanline == htrim_elastic_scanline) {
+                        buf[vblank_di_len - 3] += (uint32_t)htrim_elastic_total;
+                    }
+                } else {
+                    buf[vblank_di_len - 3] += (uint32_t)(int32_t)htrim_px;
+                }
+#endif
                 ch->read_addr = (uintptr_t)buf;
                 ch->transfer_count = vblank_di_len;
             } else {
-                ch->read_addr = (uintptr_t)vblank_di_null;
-                ch->transfer_count = vblank_di_null_len;
+#if PICO_HDMI_VBLANK_HTRIM
+                if (htrim_elastic_mode && v_scanline == htrim_elastic_scanline) {
+                    ch->read_addr = (uintptr_t)vblank_elastic;
+                    ch->transfer_count = vblank_elastic_len;
+                } else
+#endif
+                {
+                    ch->read_addr = (uintptr_t)vblank_di_null;
+                    ch->transfer_count = vblank_di_null_len;
+                }
             }
 #endif
         }
@@ -1325,6 +1488,20 @@ static void build_all_command_lists(const video_mode_t *mode)
     hstx_data_island_t island;
     const bool mode_is_240p = mode->v_active_lines == 240 && mode->h_active_pixels == 1280;
     const bool mode_is_720p_rb = mode->v_active_lines == 720 && mode->h_active_pixels == 1280;
+#if PICO_HDMI_VBLANK_HTRIM
+    // Retired on hardware evidence: elastic single-line trim did not fix the
+    // 240p artifact (symptom was byte-identical across broken-trim,
+    // uniform-trim, and elastic-trim builds), so trim distribution was never
+    // the cause -- the nonstandard genlock raster was (see video_mode_240_p
+    // above, now retimed to 1613x264). Uniform trim at the retimed raster is
+    // ~2 px, sub-threshold, so 240p reverts to the same uniform-trim path as
+    // 480p/720p. Machinery kept compiled but dormant for possible reuse.
+    htrim_elastic_mode = false;
+    if (htrim_elastic_mode) {
+        htrim_elastic_scanline = 1; // see line-map comment above htrim_elastic_mode
+        htrim_elastic_gain = (uint16_t)(mode->v_total_lines - mode->v_active_lines);
+    }
+#endif
     uint8_t vic = (mode->v_active_lines == 480 && mode->h_active_pixels == 640) ? 1 : 0;
 #if PICO_HDMI_LEGACY_240P_AVI_INFOFRAME
     uint8_t pixel_repetition = 0;
@@ -1348,6 +1525,20 @@ static void build_all_command_lists(const video_mode_t *mode)
 
     vblank_di_len = BUILD_LINE_WITH_DI(vblank_di_ping, hstx_get_null_data_island(false, di_hsync_active), false, false);
     memcpy(vblank_di_pong, vblank_di_ping, sizeof(vblank_di_ping));
+
+#if PICO_HDMI_VBLANK_HTRIM
+    // Elastic 240p vblank line: a private copy of vblank_di_null. Only its
+    // tail word is ever patched (video_output_set_vblank_htrim_px()), and
+    // only when htrim_elastic_mode is set; harmless to build unconditionally
+    // at every mode apply.
+    vblank_elastic_len = vblank_di_null_len;
+    memcpy(vblank_elastic, vblank_di_null, sizeof(uint32_t) * vblank_di_null_len);
+    htrim_elastic_base = (uint16_t)(vblank_elastic[vblank_elastic_len - 3] & 0xFFFU);
+
+    // Re-scan every template just (re)built above for htrim slots. Runs on
+    // mode apply / init only, never per-line.
+    htrim_register_all();
+#endif
 }
 
 static void apply_mode(const video_mode_t *mode)
@@ -1587,6 +1778,14 @@ void video_output_update_acr(uint32_t pixel_clock_hz)
 
     __dmb();
     use_genlock_acr = true;
+
+#if PICO_HDMI_VBLANK_HTRIM
+    // genlock_acr_vsync_on/off are built later than the mode-apply templates
+    // (this is called after the sys_clk genlock adjustment, well after
+    // build_all_command_lists()); re-scan now to pick up their htrim slots.
+    // htrim_register_all() preserves whatever trim is already applied.
+    htrim_register_all();
+#endif
 }
 
 void video_output_request_resync(void)
