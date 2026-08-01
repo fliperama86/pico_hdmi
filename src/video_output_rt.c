@@ -365,8 +365,17 @@ volatile uint32_t video_frame_count = 0;
 // DVI mode: when true, disables all HDMI Data Islands (pure DVI output, no audio)
 static bool dvi_mode = false;
 
-// Max active pixels across all modes (1280 for 240p)
+// Max active pixels across all modes (1280 for 240p/720p).
+// FEASIBILITY SPIKE (PICO_HDMI_PIXEL_FORMAT_RGB888, default OFF): one 32-bit
+// RGB888 word per pixel instead of two packed 16-bit RGB565 pixels per word,
+// so the buffer element type/width doubles in bytes (1280 x uint32_t vs
+// 1280 x uint16_t). Element count stays 1280 either way -- it is a pixel
+// count in the RGB888 case and a halfword (2px) count in the RGB565 case.
+#if PICO_HDMI_PIXEL_FORMAT_RGB888
+static uint32_t PICO_HDMI_LINE_BUFFER_ATTR line_buffer[1280] __attribute__((aligned(4)));
+#else
 static uint16_t PICO_HDMI_LINE_BUFFER_ATTR line_buffer[1280] __attribute__((aligned(4)));
+#endif
 static uint32_t v_scanline = 2;
 static bool vactive_cmdlist_posted = false;
 static bool dma_pong = false;
@@ -1015,9 +1024,16 @@ static inline void __scratch_x("")
         if (scanline_callback) {
             scanline_callback(v_scanline, active_line, dst32);
         } else {
+#if PICO_HDMI_PIXEL_FORMAT_RGB888
+            // One 32-bit RGB888 word per pixel.
+            for (uint32_t i = 0; i < rt_h_active_pixels; i++) {
+                dst32[i] = 0;
+            }
+#else
             for (uint32_t i = 0; i < rt_h_active_pixels / 2; i++) {
                 dst32[i] = 0;
             }
+#endif
         }
 #if PICO_HDMI_PRECOMPOSED_ACTIVE_LINES
         active_data_ptr = (const uint32_t *)line_buffer;
@@ -1131,9 +1147,14 @@ static inline void __scratch_x("") video_output_handle_active_data(dma_channel_h
 #else
     ch->read_addr = (uintptr_t)line_buffer;
 #endif
+#if PICO_HDMI_PIXEL_FORMAT_RGB888
+    // RGB888 feasibility spike: one 32-bit word per pixel, no packing.
+    ch->transfer_count = rt_h_active_pixels;
+#else
     // 32-bit mode: h_active/2 words of pre-expanded pixel pairs. Native
     // 16-bit mode: the same count as halfword transfers, bus-replicated.
     ch->transfer_count = (rt_h_active_pixels * sizeof(uint16_t)) / sizeof(uint32_t);
+#endif
 }
 
 // ============================================================================
@@ -1447,6 +1468,22 @@ void video_output_set_vsync_callback(video_output_vsync_cb_t cb)
 void video_output_core1_run(void)
 {
     // HSTX Hardware Setup
+#if PICO_HDMI_PIXEL_FORMAT_RGB888
+    // FEASIBILITY SPIKE: one 32-bit 0x00RRGGBB word per pixel (RP2350
+    // datasheet Sec 12.11). NBITS=7 encodes 8 valid bits per lane; lane
+    // assignment stays L0=blue, L1=green, L2=red. Each lane's NBITS bits end
+    // at bit 7 of its right-rotated word, so for 0x00RRGGBB: L0 (bits 7:0)
+    // ROT=0, L1 (bits 15:8) ROT=8, L2 (bits 23:16) ROT=16.
+    hstx_ctrl_hw->expand_tmds = 7 << HSTX_CTRL_EXPAND_TMDS_L2_NBITS_LSB | 16 << HSTX_CTRL_EXPAND_TMDS_L2_ROT_LSB |
+                                7 << HSTX_CTRL_EXPAND_TMDS_L1_NBITS_LSB | 8 << HSTX_CTRL_EXPAND_TMDS_L1_ROT_LSB |
+                                7 << HSTX_CTRL_EXPAND_TMDS_L0_NBITS_LSB | 0 << HSTX_CTRL_EXPAND_TMDS_L0_ROT_LSB;
+
+    // One pixel per FIFO word: ENC_N_SHIFTS=1, ENC_SHIFT=0. RAW_ fields are
+    // for control-symbol (Data Island) words and are unchanged.
+    hstx_ctrl_hw->expand_shift =
+        1 << HSTX_CTRL_EXPAND_SHIFT_ENC_N_SHIFTS_LSB | 0 << HSTX_CTRL_EXPAND_SHIFT_ENC_SHIFT_LSB |
+        1 << HSTX_CTRL_EXPAND_SHIFT_RAW_N_SHIFTS_LSB | 0 << HSTX_CTRL_EXPAND_SHIFT_RAW_SHIFT_LSB;
+#else
     hstx_ctrl_hw->expand_tmds = 4 << HSTX_CTRL_EXPAND_TMDS_L2_NBITS_LSB | 8 << HSTX_CTRL_EXPAND_TMDS_L2_ROT_LSB |
                                 5 << HSTX_CTRL_EXPAND_TMDS_L1_NBITS_LSB | 3 << HSTX_CTRL_EXPAND_TMDS_L1_ROT_LSB |
                                 4 << HSTX_CTRL_EXPAND_TMDS_L0_NBITS_LSB | 29 << HSTX_CTRL_EXPAND_TMDS_L0_ROT_LSB;
@@ -1454,7 +1491,12 @@ void video_output_core1_run(void)
     hstx_ctrl_hw->expand_shift =
         2 << HSTX_CTRL_EXPAND_SHIFT_ENC_N_SHIFTS_LSB | 16 << HSTX_CTRL_EXPAND_SHIFT_ENC_SHIFT_LSB |
         1 << HSTX_CTRL_EXPAND_SHIFT_RAW_N_SHIFTS_LSB | 0 << HSTX_CTRL_EXPAND_SHIFT_RAW_SHIFT_LSB;
+#endif
 
+    // NOTE: csr.N_SHIFTS/SHIFT below govern the TMDS *output* side (3 lanes x
+    // 10-bit symbols, 2 raw bits shifted out per HSTX clock in DDR) and are
+    // independent of expand_tmds/expand_shift, which govern the *input* pixel
+    // expansion feeding the TMDS encoder. Do not change csr for pixel format.
     hstx_ctrl_hw->csr = 0;
     hstx_ctrl_hw->csr = HSTX_CTRL_CSR_EXPAND_EN_BITS |
                         (uint32_t)video_output_active_mode->hstx_csr_clkdiv << HSTX_CTRL_CSR_CLKDIV_LSB |
