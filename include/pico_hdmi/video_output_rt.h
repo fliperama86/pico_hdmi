@@ -41,6 +41,10 @@ extern const video_mode_t video_mode_240_p;
 extern const video_mode_t video_mode_240_p_genlock;
 #endif
 extern const video_mode_t video_mode_720_p;
+// Dormant CEA VIC 4 720p timing (classic 1280x720, 74.25 MHz nominal); see
+// video_output_rt.c. Not currently selected anywhere; kept for a possible
+// future "720p Timing: CEA" menu option.
+extern const video_mode_t video_mode_720_p_cea;
 extern const video_mode_t video_mode_960x720_p;
 extern const video_mode_t video_mode_1024x768_p;
 extern const video_mode_t *video_output_active_mode;
@@ -164,6 +168,10 @@ void video_output_request_resync(void);
 void video_output_set_vblank_htrim_px(int px);
 int video_output_get_vblank_htrim_slots(void); // 0 = registration found nothing
 int video_output_get_vblank_htrim_px(void);    // current applied (clamped) trim
+
+// Recompute audio Data Island pacing from the current (htrim-trimmed) raster;
+// call from a non-ISR (Core 1 background) context whenever trim or vtotal changes.
+void video_output_htrim_update_audio_pacing(void);
 
 // Perf probe: returns and re-arms the windowed minimum HSTX FIFO level and
 // the maximum inter-IRQ gap (us) observed since the previous call.

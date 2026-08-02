@@ -338,6 +338,29 @@ const video_mode_t video_mode_720_p = {
     .data_island_in_hsync = false,
 };
 
+// Dormant CEA VIC 4 720p timing: classic 1280x720 raster, 74.25 MHz nominal
+// (74.4 MHz from 372 MHz sysclk / 5). Hardware-validated clean on Morph4K
+// 2026-08-01, where the exact-clock raster above (video_mode_720_p) shows
+// magenta pixel sparkles. Currently dormant: nothing selects it. Kept as a
+// future "720p Timing: CEA" menu option. Requires 372 MHz sysclk at 1.30V.
+const video_mode_t video_mode_720_p_cea = {
+    .h_front_porch = 110,
+    .h_sync_width = 40,
+    .h_back_porch = 220,
+    .h_active_pixels = 1280,
+    .v_front_porch = 5,
+    .v_sync_width = 5,
+    .v_back_porch = 20,
+    .v_active_lines = 720,
+    .h_total_pixels = 1650,
+    .v_total_lines = 750,
+    .hstx_clk_div = 1,
+    .hstx_csr_clkdiv = 5,
+    .hsync_positive = true,
+    .vsync_positive = true,
+    .data_island_in_hsync = false,
+};
+
 // VESA CVT 960x720 @ 60Hz, adjusted only to the exact 56.0 MHz pixel clock
 // available from a 280 MHz RP2350 PLL. The active raster is exactly the 3x
 // 320x240 image, so no active-area borders are required.
@@ -1808,6 +1831,7 @@ static void build_all_command_lists(const video_mode_t *mode)
     }
 #endif
     uint8_t vic = (mode->v_active_lines == 480 && mode->h_active_pixels == 640) ? 1 : 0;
+    if (mode->v_active_lines == 720 && mode->h_total_pixels == 1650) vic = 4;
 #if PICO_HDMI_LEGACY_240P_AVI_INFOFRAME
     uint8_t pixel_repetition = 0;
 #else
@@ -1817,7 +1841,9 @@ static void build_all_command_lists(const video_mode_t *mode)
     if (mode_is_240p) {
         hstx_packet_set_avi_infoframe(&packet, vic, pixel_repetition);
     } else {
-        hstx_packet_set_avi_infoframe_aspect(&packet, vic, pixel_repetition, mode_is_720p_rb);
+        // VIC 4 requires the 16:9 aspect code even though it isn't the
+        // exact-clock CVT-RB descriptor mode_is_720p_rb detects.
+        hstx_packet_set_avi_infoframe_aspect(&packet, vic, pixel_repetition, mode_is_720p_rb || vic == 4);
     }
     hstx_encode_data_island(&island, &packet, false, di_hsync_active);
     vblank_avi_infoframe_len = BUILD_LINE_WITH_DI(vblank_avi_infoframe, island.words, false, false);
@@ -2132,6 +2158,71 @@ void video_output_update_acr(uint32_t pixel_clock_hz)
     htrim_register_all();
 #endif
 }
+
+#if PICO_HDMI_VBLANK_HTRIM
+// Recompute audio Data Island pacing (samples-per-line) from the EFFECTIVE
+// (htrim-adjusted) raster instead of the nominal one configure_audio_packets()
+// paced from at mode-apply time.
+//
+// Why this is needed: the genlock servo (video_output_set_vblank_htrim_px())
+// stretches or shrinks every blanking line by htrim_px pixel clocks to track
+// the source's frame rate. That changes the true average line period, but
+// configure_audio_packets() computed samples_per_line once from the nominal
+// h_total, before any trim was ever applied. The HDMI sink, meanwhile, always
+// consumes audio at exactly current_sample_rate: ACR's CTS is derived from the
+// (unchanged) pixel clock, not from how long our lines actually are. So while
+// htrim is active we deliver samples at sample_rate * f_actual / f_nominal
+// instead of sample_rate. The gap is only a handful of samples per second, but
+// it steadily slips the sink's audio FIFO until it audibly drops out.
+//
+// The fix: fold htrim_px into the frame's total pixel count (frame_px) before
+// dividing, so spl/rem are paced from the actual line rate instead of the
+// nominal one. This cancels the imbalance exactly, including crystal
+// tolerance, because both audio delivery and the sink's ACR-driven
+// consumption ultimately scale off the same physical pixel clock: whatever
+// frame_px really is, we deliver sample_rate * frame_px / (v_total * pclk)
+// samples per pixel-clock second, which is what the sink expects.
+//
+// Must be called from a non-ISR background context (Core 1 background task),
+// not from the scanline ISR: it does a 64-bit divide and touches state shared
+// with hstx_di_queue_tick(). If the ISR preempts mid-update, the queue is
+// re-armed with the new pacing on the next call; at worst a single line is
+// mis-paced by a sub-sample amount, which is inaudible.
+//
+// With px == 0 (htrim inactive) this is bit-identical to the exact pacing
+// values configure_audio_packets() already computes: the v_total factor
+// introduced here cancels (frame_px reduces to h_total * v_total), so
+// spl/rem/den come out the same as the nominal (h_total * sample_rate << 16)
+// / pixel_clock computation.
+void video_output_htrim_update_audio_pacing(void)
+{
+    static int16_t pacing_px_applied;
+    static uint16_t pacing_vtotal_applied;
+    const int16_t px = htrim_px;
+    const uint16_t v_total = rt_v_total_lines;
+    if (px == pacing_px_applied && v_total == pacing_vtotal_applied) {
+        return;
+    }
+    pacing_px_applied = px;
+    pacing_vtotal_applied = v_total;
+
+    const uint32_t h_total = video_output_active_mode->h_total_pixels;
+    const uint32_t v_active = rt_v_active_lines;
+    const uint32_t pclk = clock_get_hz(clk_hstx) / video_output_active_mode->hstx_csr_clkdiv;
+
+    int64_t frame_px = (int64_t)h_total * v_total + (int64_t)px * (int32_t)(v_total - v_active);
+    uint64_t num = ((uint64_t)current_sample_rate * (uint64_t)frame_px) << 16;
+    uint64_t den64 = (uint64_t)v_total * pclk;
+    uint32_t spl = (uint32_t)(num / den64);
+    uint64_t rem64 = num - (uint64_t)spl * den64;
+    uint32_t rem = (uint32_t)((rem64 + v_total / 2u) / v_total);
+    if (rem >= pclk) {
+        rem -= pclk;
+        spl += 1;
+    }
+    hstx_di_queue_set_samples_per_line_exact(spl, rem, pclk);
+}
+#endif
 
 void video_output_request_resync(void)
 {
