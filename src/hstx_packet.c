@@ -12,6 +12,13 @@
 #define PICO_HDMI_LEGACY_240P_AVI_INFOFRAME 0
 #endif
 
+// The scanout path carries full-range RGB (0-255). With AVI Q=default,
+// spec-strict sinks (OSSC Pro, Morph4K) assume limited range and expand
+// 16-235, crushing blacks and clipping whites. Declare Q=Full explicitly.
+#ifndef PICO_HDMI_AVI_RGB_FULL_RANGE
+#define PICO_HDMI_AVI_RGB_FULL_RANGE 1
+#endif
+
 // ============================================================================
 // TERC4 Symbol Table (4-bit to 10-bit encoding)
 // ============================================================================
@@ -268,7 +275,8 @@ void hstx_packet_set_avi_infoframe_aspect(hstx_packet_t *packet, uint8_t vic, ui
         // 720p uses VIC 0 but still needs the 16:9 picture aspect code.
         packet->subpacket[0][2] = aspect_16_9 ? 0x28 : 0x18;
     }
-    packet->subpacket[0][3] = 0x00;
+    // PB3: Q (bits 3:2) = 10 declares full-range RGB quantization.
+    packet->subpacket[0][3] = PICO_HDMI_AVI_RGB_FULL_RANGE ? 0x08 : 0x00;
     packet->subpacket[0][4] = vic;
     packet->subpacket[0][5] = pixel_repetition & 0x0F;
 
