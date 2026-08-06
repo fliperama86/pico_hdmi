@@ -506,15 +506,16 @@ static uint32_t line_buffer_b[1280] __attribute__((aligned(4)));
 static uint16_t line_buffer_b[1280] __attribute__((aligned(4)));
 #endif
 static uint32_t *const db_buffers[2] = {(uint32_t *)line_buffer, (uint32_t *)line_buffer_b};
-// 50% (adjustable 0-100%) scanlines at 720p. Dimmed companions of line_buffer/line_buffer_b, one
-// per front/back slot, so the THIRD physical line of each 3-line group
-// (active_line % 3 == 2) can DMA out of a pre-dimmed copy instead of the
-// full-brightness front buffer. Two are required, not one: while
-// db_buffers[db_front_idx ^ 1] is being filled for the NEXT group,
+// 50% (adjustable 0-100%) scanlines at 720p. Dimmed companions of
+// line_buffer/line_buffer_b, one per front/back slot, so the OUTER TWO
+// physical lines of each 3-line group (active_line % 3 != 1) can DMA out of a
+// pre-dimmed copy instead of the full-brightness front buffer, putting the
+// bright row in the middle where the beam belongs. Two are required, not one:
+// while db_buffers[db_front_idx ^ 1] is being filled for the NEXT group,
 // db_dim_buffers[db_front_idx] is still being scanned out for the CURRENT
-// group's third line -- a single dim buffer would be overwritten while still
-// being read. Plain BSS, same reasoning as line_buffer_b above (two more
-// buffers do not fit in the 4 KB scratch_y bank at RGB888 either).
+// group -- a single dim buffer would be overwritten while still being read.
+// Plain BSS, same reasoning as line_buffer_b above (two more buffers do not
+// fit in the 4 KB scratch_y bank at RGB888 either).
 #if PICO_HDMI_PIXEL_FORMAT_RGB888
 static uint32_t dim_buffer_a[1280] __attribute__((aligned(4)));
 static uint32_t dim_buffer_b[1280] __attribute__((aligned(4)));
@@ -569,7 +570,7 @@ static bool db_fill_armed;
 static uint db_fill_irq_num = (uint)-1;
 // The buffer pointer for THIS active line's upcoming DATA segment, resolved
 // once by video_output_handle_active_start() (to db_dim_buffers[] on the
-// group's third physical line, db_buffers[] otherwise) and consumed
+// group's outer two physical lines, db_buffers[] on its middle one) and consumed
 // verbatim one ISR call later by video_output_handle_active_data(), which
 // alternates 1:1 with active_start for the same active_line (see the
 // db_fill_armed comment above). Kept as a single pre-resolved pointer,
@@ -1339,14 +1340,32 @@ static inline void __scratch_x("") video_output_handle_vsync(dma_channel_hw_t *c
 // the roomier scratch_y bank instead, leaving only a single call in the
 // scratch_x hot path.
 // Level OFF (0) forces this to always resolve db_buffers[] (never
-// db_dim_buffers[]): the third line then reads the normal front buffer, same
-// as every other line, so OFF costs nothing extra here beyond the one added
-// comparison (this function is __scratch_y, which has headroom -- see its
-// own comment above).
+// db_dim_buffers[]): every line then reads the normal front buffer, so OFF
+// costs nothing extra here beyond the one added comparison (this function is
+// __scratch_y, which has headroom -- see its own comment above).
+//
+// SYMMETRIC BEAM: rows 0 and 2 of each three-row group read the dim buffer
+// and only the middle row is full brightness, so the dimming is centred on
+// the source line instead of hanging off its bottom edge. The earlier
+// dim-row-2-only rule put the whole light deficit on one side, which reads as
+// a hard dark edge UNDER each source row rather than as a beam. This costs
+// nothing: the dim buffer is produced once per group by the deferred fill
+// (see video_output_service_double_buffer_fill) and was already sitting
+// unused for two lines out of three, so widening which lines read it is a
+// change of pointer condition, not of work done. The strength kernels there
+// are remapped to compensate, keeping average brightness per group identical
+// to the asymmetric version at every level.
+//
+// active_line > 2 excludes ALL of group 0, whose db_dim_buffers[] slot is
+// never produced: group 0 is prefilled synchronously in the ISR during back
+// porch (video_output_prefill_group0(), single-line budget) with no headroom
+// for a dim pass. Those three lines run at full brightness, exactly as they
+// already did under the row-2-only rule (which also fell back for its one
+// affected line), so this is not a new exception, just a wider one.
 static void __attribute__((noinline, noclone)) __scratch_y("")
     db_resolve_active_read_ptr(uint32_t line_mod3, uint32_t active_line)
 {
-    db_active_read_ptr = ((g_scanline_level != 0U) && (line_mod3 == 2U) && (active_line != 2U))
+    db_active_read_ptr = ((g_scanline_level != 0U) && (line_mod3 != 1U) && (active_line > 2U))
                               ? db_dim_buffers[db_front_idx]
                               : db_buffers[db_front_idx];
 }
@@ -1399,17 +1418,18 @@ static inline void __scratch_x("")
             // Resolve, once, the buffer video_output_handle_active_data()
             // will read for THIS active_line's DATA segment -- AFTER any
             // db_front_idx flip above, so a group's first line already sees
-            // its own (post-flip) front buffer. The group's third physical
-            // line (active_line % 3 == 2) reads the pre-dimmed companion
-            // instead of the full-brightness front buffer, except
-            // active_line == 2 (group 0's third line): db_dim_buffers[0] is
+            // its own (post-flip) front buffer, which matters now that the
+            // first line is one of the dimmed ones. The group's outer two
+            // physical lines (active_line % 3 != 1) read the pre-dimmed
+            // companion instead of the full-brightness front buffer, except
+            // throughout group 0 (active_line <= 2): db_dim_buffers[0] is
             // only ever refreshed by the deferred fill service routine
             // below, which runs at a full 3-line-period budget; group 0
             // itself is prefilled synchronously in the ISR during back porch
             // (video_output_prefill_group0(), single-line budget), which has
             // no headroom for a second 1280-word dim pass -- see
             // db_resolve_active_read_ptr() above for the exact rule. Falling
-            // back to the full-brightness buffer for that one line, once per
+            // back to the full-brightness buffer for that one group, once per
             // frame, beats showing a stale dim copy left over from a
             // different part of a previous frame.
             db_resolve_active_read_ptr(line_mod3, active_line);
@@ -1699,20 +1719,46 @@ static void video_output_service_double_buffer_fill(void)
 #endif
     }
     // Runtime 5-level scanline strength: produce the dimmed companion for
-    // this group's third physical line right after the full-brightness fill
-    // above, while it is still fresh. Runs from this deferred-fill service
-    // routine (IRQ or Core 1 background-loop fallback, never the per-segment
-    // scratch_x ISR path), which gets a full 3-line-period budget --
-    // comfortably enough for two back-to-back passes over the same word
+    // this group's OUTER TWO physical lines right after the full-brightness
+    // fill above, while it is still fresh. Runs from this deferred-fill
+    // service routine (IRQ or Core 1 background-loop fallback, never the
+    // per-segment scratch_x ISR path), which gets a full 3-line-period budget
+    // -- comfortably enough for two back-to-back passes over the same word
     // count the fill above used. Level OFF (0) skips this block entirely --
-    // db_resolve_active_read_ptr() above already makes the third line read
-    // the normal buffer in that case, so this dim pass would just be wasted
-    // work. The switch selects one of four SEPARATE tight loops, never a
-    // per-pixel branch: __uhadd8 halves each byte lane independently
-    // (UHADD8: res[i] = (a[i] + b[i]) >> 1, no masking, no cross-channel
-    // bleed), composed to match video_pipeline.h's per-8-bit-channel
-    // formulas exactly -- 50% (level 2) is the original single uhadd8(v,0);
-    // 25%/75% compose two; 100% (fully black) needs none.
+    // db_resolve_active_read_ptr() above already makes every line read the
+    // normal buffer in that case, so this dim pass would just be wasted work.
+    //
+    // THESE KERNELS ARE COST-CRITICAL -- DO NOT MAKE THEM MORE EXPENSIVE.
+    // Hardware-measured 2026-08-06: dimming two rows per group instead of one
+    // is free (the read-pointer change costs nothing), but adding a single
+    // extra __uhadd8 per word to these loops made the scanlines wobble
+    // vertically at random AND starved the Core 1 background loop badly
+    // enough that the OSD stopped responding to input. Isolated with a build
+    // whose .text was byte-for-byte the same size as the known-good one, so
+    // this is a real budget wall, not a flash-alignment artifact. Whatever
+    // the "comfortably enough for two back-to-back passes" claim above is
+    // worth, this pass has NO measurable headroom in practice.
+    //
+    // The consequence for the strength ladder, accepted deliberately: the
+    // factors below are the same ones the 480p path uses, so applying them to
+    // two rows of three instead of one row of two makes a given level DARKER
+    // at 720p than at 480p -- group average (1 + 2d)/3 here against (1 + d)/2
+    // there. Before the beam was centred, 720p averaged (2 + d)/3 and ran
+    // slightly LIGHTER than 480p, so the mismatch has changed sign rather
+    // than appeared. Equalizing the two would need factors of (1 + d)/2,
+    // which is exactly the extra arithmetic that does not fit; the way to
+    // afford it is to stop re-loading 1280 words here and compose the dim
+    // line from a companion dim LUT during the fill above, which would remove
+    // work rather than add it.
+    //
+    // The switch selects one of four SEPARATE tight loops, never a per-pixel
+    // branch: __uhadd8 halves each byte lane independently (UHADD8:
+    // res[i] = (a[i] + b[i]) >> 1, no masking, no cross-channel bleed),
+    // composed to match video_pipeline.h's per-8-bit-channel formulas exactly
+    // -- 50% (level 2) is a single uhadd8(v,0); 25%/75% compose two; 100%
+    // (fully black) needs none and must stay a store-only loop, since that is
+    // the cheapest kernel here and turning it into a load-modify-store was
+    // among the changes that broke the budget.
     if (g_scanline_level != 0U) {
         // dst32 (== db_fill_dst) is one of db_buffers[0]/db_buffers[1] by
         // construction (see the arm site above); derive the matching
