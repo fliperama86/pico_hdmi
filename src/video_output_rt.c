@@ -22,6 +22,12 @@
 
 #include "hstx_pins_internal.h"
 
+// Cortex-M33 byte-wise SIMD (__uhadd8 -> UHADD8): halves each byte lane of a
+// 32-bit word independently, res[i] = (a[i] + b[i]) >> 1. Used below to dim
+// RGB888 pixel words to exact 50% per channel with no masking and no
+// cross-channel bleed.
+#include <arm_acle.h>
+
 #ifndef PICO_HDMI_RT_RUNTIME_MODE_ATTRS
 #define PICO_HDMI_RT_RUNTIME_MODE_ATTRS 0
 #endif
@@ -500,6 +506,27 @@ static uint32_t line_buffer_b[1280] __attribute__((aligned(4)));
 static uint16_t line_buffer_b[1280] __attribute__((aligned(4)));
 #endif
 static uint32_t *const db_buffers[2] = {(uint32_t *)line_buffer, (uint32_t *)line_buffer_b};
+// 50% (adjustable 0-100%) scanlines at 720p. Dimmed companions of line_buffer/line_buffer_b, one
+// per front/back slot, so the THIRD physical line of each 3-line group
+// (active_line % 3 == 2) can DMA out of a pre-dimmed copy instead of the
+// full-brightness front buffer. Two are required, not one: while
+// db_buffers[db_front_idx ^ 1] is being filled for the NEXT group,
+// db_dim_buffers[db_front_idx] is still being scanned out for the CURRENT
+// group's third line -- a single dim buffer would be overwritten while still
+// being read. Plain BSS, same reasoning as line_buffer_b above (two more
+// buffers do not fit in the 4 KB scratch_y bank at RGB888 either).
+#if PICO_HDMI_PIXEL_FORMAT_RGB888
+static uint32_t dim_buffer_a[1280] __attribute__((aligned(4)));
+static uint32_t dim_buffer_b[1280] __attribute__((aligned(4)));
+#else
+static uint16_t dim_buffer_a[1280] __attribute__((aligned(4)));
+static uint16_t dim_buffer_b[1280] __attribute__((aligned(4)));
+#endif
+static uint32_t *const db_dim_buffers[2] = {(uint32_t *)dim_buffer_a, (uint32_t *)dim_buffer_b};
+// Runtime scanline strength, 0..4 (see video_output_set_scanline_level() in
+// video_output_rt.h for the level meanings). Default 2 (50%) matches this
+// feature's previous fixed behavior, before runtime levels existed.
+static uint8_t g_scanline_level = 2U;
 // True only while the active mode's v_active_lines==720 (set in
 // init_rt_from_mode()); other modes always take the single-buffer path.
 static bool rt_double_buffer_active;
@@ -540,6 +567,15 @@ static bool db_fill_armed;
 // collide with anything Core 0 claims. Priority is set clearly below
 // DMA_IRQ_0 (0, highest) so the scanout ISR always preempts it.
 static uint db_fill_irq_num = (uint)-1;
+// The buffer pointer for THIS active line's upcoming DATA segment, resolved
+// once by video_output_handle_active_start() (to db_dim_buffers[] on the
+// group's third physical line, db_buffers[] otherwise) and consumed
+// verbatim one ISR call later by video_output_handle_active_data(), which
+// alternates 1:1 with active_start for the same active_line (see the
+// db_fill_armed comment above). Kept as a single pre-resolved pointer,
+// rather than a flag handle_active_data re-branches on, to minimize the
+// extra code in these two scratch_x functions.
+static uint32_t *db_active_read_ptr;
 #endif // PICO_HDMI_ACTIVE_LINE_DOUBLE_BUFFER
 
 static uint32_t v_scanline = 2;
@@ -1293,6 +1329,28 @@ static inline void __scratch_x("") video_output_handle_vsync(dma_channel_hw_t *c
     }
 }
 
+// Resolves db_active_read_ptr for video_output_handle_active_start() below.
+// Pulled out of that __scratch_x function into __scratch_y, matching
+// db_fill_arm_fire's precedent further down: SCRATCH_X is shared with the
+// Core 1 stack (.stack1_dummy) and was already at its link-time budget
+// before this feature existed, so this selection logic -- taken on every
+// active line, but with no per-segment deadline of its own beyond what the
+// caller (already comfortably within budget) already meets -- is pushed to
+// the roomier scratch_y bank instead, leaving only a single call in the
+// scratch_x hot path.
+// Level OFF (0) forces this to always resolve db_buffers[] (never
+// db_dim_buffers[]): the third line then reads the normal front buffer, same
+// as every other line, so OFF costs nothing extra here beyond the one added
+// comparison (this function is __scratch_y, which has headroom -- see its
+// own comment above).
+static void __attribute__((noinline, noclone)) __scratch_y("")
+    db_resolve_active_read_ptr(uint32_t line_mod3, uint32_t active_line)
+{
+    db_active_read_ptr = ((g_scanline_level != 0U) && (line_mod3 == 2U) && (active_line != 2U))
+                              ? db_dim_buffers[db_front_idx]
+                              : db_buffers[db_front_idx];
+}
+
 static inline void __scratch_x("")
     video_output_handle_active_start(dma_channel_hw_t *ch, uint32_t v_scanline, uint32_t active_line, bool dma_pong)
 {
@@ -1304,7 +1362,11 @@ static inline void __scratch_x("")
     {
 #if PICO_HDMI_ACTIVE_LINE_DOUBLE_BUFFER
         if (rt_double_buffer_active) {
-            if ((active_line % 3U) == 0U) {
+            // Computed once and reused below (instead of a second
+            // "active_line % 3U" at the db_active_read_ptr site) to keep
+            // this scratch_x function's extra code as small as possible.
+            const uint32_t line_mod3 = active_line % 3U;
+            if (line_mod3 == 0U) {
                 if (active_line != 0U) {
                     // Group advances: the back buffer (filled ahead of time
                     // by the background loop) becomes the new front.
@@ -1334,6 +1396,23 @@ static inline void __scratch_x("")
             }
             // active_line % 3 != 0: the front buffer already holds this
             // group's content (filled 3 lines-worth of wall clock ago).
+            // Resolve, once, the buffer video_output_handle_active_data()
+            // will read for THIS active_line's DATA segment -- AFTER any
+            // db_front_idx flip above, so a group's first line already sees
+            // its own (post-flip) front buffer. The group's third physical
+            // line (active_line % 3 == 2) reads the pre-dimmed companion
+            // instead of the full-brightness front buffer, except
+            // active_line == 2 (group 0's third line): db_dim_buffers[0] is
+            // only ever refreshed by the deferred fill service routine
+            // below, which runs at a full 3-line-period budget; group 0
+            // itself is prefilled synchronously in the ISR during back porch
+            // (video_output_prefill_group0(), single-line budget), which has
+            // no headroom for a second 1280-word dim pass -- see
+            // db_resolve_active_read_ptr() above for the exact rule. Falling
+            // back to the full-brightness buffer for that one line, once per
+            // frame, beats showing a stale dim copy left over from a
+            // different part of a previous frame.
+            db_resolve_active_read_ptr(line_mod3, active_line);
         } else
 #endif
         {
@@ -1514,7 +1593,12 @@ static inline void __scratch_x("") video_output_handle_active_data(dma_channel_h
 #if PICO_HDMI_PRECOMPOSED_ACTIVE_LINES
     ch->read_addr = (uintptr_t)active_data_ptr;
 #elif PICO_HDMI_ACTIVE_LINE_DOUBLE_BUFFER
-    ch->read_addr = rt_double_buffer_active ? (uintptr_t)db_buffers[db_front_idx] : (uintptr_t)line_buffer;
+    // 50% (adjustable 0-100%) scanlines: db_active_read_ptr, resolved by
+    // the preceding active_start call, already points at db_dim_buffers[]
+    // for the group's third physical line and db_buffers[] otherwise -- a
+    // single pre-resolved pointer read here, same shape/cost as the
+    // non-scanlines line below. transfer_count is unchanged either way.
+    ch->read_addr = rt_double_buffer_active ? (uintptr_t)db_active_read_ptr : (uintptr_t)line_buffer;
 #else
     ch->read_addr = (uintptr_t)line_buffer;
 #endif
@@ -1613,6 +1697,56 @@ static void video_output_service_double_buffer_fill(void)
             dst32[i] = 0;
         }
 #endif
+    }
+    // Runtime 5-level scanline strength: produce the dimmed companion for
+    // this group's third physical line right after the full-brightness fill
+    // above, while it is still fresh. Runs from this deferred-fill service
+    // routine (IRQ or Core 1 background-loop fallback, never the per-segment
+    // scratch_x ISR path), which gets a full 3-line-period budget --
+    // comfortably enough for two back-to-back passes over the same word
+    // count the fill above used. Level OFF (0) skips this block entirely --
+    // db_resolve_active_read_ptr() above already makes the third line read
+    // the normal buffer in that case, so this dim pass would just be wasted
+    // work. The switch selects one of four SEPARATE tight loops, never a
+    // per-pixel branch: __uhadd8 halves each byte lane independently
+    // (UHADD8: res[i] = (a[i] + b[i]) >> 1, no masking, no cross-channel
+    // bleed), composed to match video_pipeline.h's per-8-bit-channel
+    // formulas exactly -- 50% (level 2) is the original single uhadd8(v,0);
+    // 25%/75% compose two; 100% (fully black) needs none.
+    if (g_scanline_level != 0U) {
+        // dst32 (== db_fill_dst) is one of db_buffers[0]/db_buffers[1] by
+        // construction (see the arm site above); derive the matching
+        // db_dim_buffers[] slot from it here (outside the scratch_x ISR
+        // path, so an extra compare costs nothing) rather than stashing a
+        // redundant index alongside db_fill_dst.
+        uint32_t *dim32 = (dst32 == db_buffers[0]) ? db_dim_buffers[0] : db_dim_buffers[1];
+#if PICO_HDMI_PIXEL_FORMAT_RGB888
+        const uint32_t dim_words = rt_h_active_pixels;
+#else
+        const uint32_t dim_words = rt_h_active_pixels / 2U;
+#endif
+        switch (g_scanline_level) {
+            case 1U: // 25% strength -> 75% brightness: uhadd8(v, uhadd8(v,0))
+                for (uint32_t i = 0; i < dim_words; i++) {
+                    dim32[i] = __uhadd8(dst32[i], __uhadd8(dst32[i], 0));
+                }
+                break;
+            case 3U: // 75% strength -> 25% brightness: uhadd8(uhadd8(v,0),0)
+                for (uint32_t i = 0; i < dim_words; i++) {
+                    dim32[i] = __uhadd8(__uhadd8(dst32[i], 0), 0);
+                }
+                break;
+            case 4U: // 100% strength: fully black, no uhadd8 needed
+                for (uint32_t i = 0; i < dim_words; i++) {
+                    dim32[i] = 0U;
+                }
+                break;
+            default: // 2U: 50% strength -> 50% brightness (previous fixed behavior)
+                for (uint32_t i = 0; i < dim_words; i++) {
+                    dim32[i] = __uhadd8(dst32[i], 0);
+                }
+                break;
+        }
     }
 }
 
@@ -2228,4 +2362,19 @@ void video_output_request_resync(void)
 {
     resync_requested = true;
     __dmb();
+}
+
+// See video_output_rt.h for the level meanings (0=OFF..4=100%, shared BY
+// NUMBER with the app's video_pipeline_scanline_level_t). A single plain
+// store: g_scanline_level is read by db_resolve_active_read_ptr()
+// (__scratch_y) and video_output_service_double_buffer_fill() (Core 1
+// background/IRQ context, not the scratch_x hot path), so no locking is
+// needed -- a level change may affect the very next line or the one after,
+// which is fine for a live OSD control.
+void video_output_set_scanline_level(uint8_t level)
+{
+    if (level > 4U) {
+        level = 4U;
+    }
+    g_scanline_level = level;
 }

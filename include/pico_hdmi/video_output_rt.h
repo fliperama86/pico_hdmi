@@ -177,4 +177,12 @@ void video_output_htrim_update_audio_pacing(void);
 // the maximum inter-IRQ gap (us) observed since the previous call.
 void video_output_perf_probe_read(uint32_t *fifo_min, uint32_t *irq_gap_max_us);
 
+// Runtime scanline STRENGTH for the double-buffered (720p/3x) active-line
+// path (see video_output_rt.c): 0=OFF, 1=25%, 2=50% (the previous fixed
+// behavior), 3=75%, 4=100% (fully black); clamped to 4. Values are shared BY
+// NUMBER with the app-side video_pipeline_scanline_level_t (video_pipeline.h)
+// so a caller can pass the same uint8_t to both. Safe from Core 0 or the
+// Core 1 background loop; never from an ISR.
+void video_output_set_scanline_level(uint8_t level);
+
 #endif // VIDEO_OUTPUT_RT_H
