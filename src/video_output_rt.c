@@ -1949,6 +1949,15 @@ static void configure_audio_packets(uint32_t sample_rate)
     vblank_infoframe_vsync_on_len = BUILD_LINE_WITH_DI(vblank_infoframe_vsync_on, island.words, true, false);
     hstx_encode_data_island(&island, &packet, false, di_hsync_active);
     vblank_infoframe_vsync_off_len = BUILD_LINE_WITH_DI(vblank_infoframe_vsync_off, island.words, false, false);
+
+    // The ACR/infoframe templates built above did not exist yet (len 0) when
+    // the mode-init htrim_register_all() ran, so without this re-scan those
+    // vblank lines stay untrimmed forever. That silently breaks the htrim
+    // audio-pacing model, which assumes EVERY blank line stretches by the
+    // trim: measured on hardware (SNES 480p genlock) the delivered audio
+    // rate ran ~24 ppm fast PER TRIM PX, overfilling the sink's audio FIFO
+    // into a periodic re-center (audible split-second mute every ~15 s).
+    htrim_register_all();
 }
 
 static void init_rt_from_mode(const video_mode_t *mode)
