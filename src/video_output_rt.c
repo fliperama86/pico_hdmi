@@ -1075,7 +1075,13 @@ void video_output_perf_probe_read(uint32_t *fifo_min, uint32_t *irq_gap_max_us)
 }
 
 #define HTRIM_MAX_SLOTS 16
-#define HTRIM_LIMIT_PX 30
+// Trim range accepted by video_output_set_vblank_htrim_px(). The registered
+// big-repeat words carry hundreds of pixels, so ±60 keeps every count
+// positive and far under the 12-bit RAW_REPEAT field. CAVEAT: the (retired)
+// 240p elastic path multiplies the trim by its per-frame gain onto a single
+// line, and only stays in range for |px| <= 30 -- callers using elastic mode
+// must clamp themselves (the neopico genlock servo keeps ±30 outside 720p).
+#define HTRIM_LIMIT_PX 60
 static uint32_t *htrim_word[HTRIM_MAX_SLOTS];
 static uint16_t htrim_base[HTRIM_MAX_SLOTS];
 static uint8_t htrim_slots;
