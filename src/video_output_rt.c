@@ -1082,10 +1082,21 @@ void video_output_perf_probe_read(uint32_t *fifo_min, uint32_t *irq_gap_max_us)
 // line, and only stays in range for |px| <= 30 -- callers using elastic mode
 // must clamp themselves (the neopico genlock servo keeps ±30 outside 720p).
 #define HTRIM_LIMIT_PX 60
+// Fine (single-line) trim stage, layered on top of the uniform htrim_px:
+// htrim_fine_px EXTRA pixel clocks on ONE designated ordinary-blanking line
+// (the dormant 240p elastic template, reused). One fine step changes the
+// frame period by a single pixel clock (~16-40 ns) instead of one pixel on
+// every blanking line, which is far below what sink input re-measurement
+// reacts to (bench 2026-08-17: a RetroTink 4K audibly blipped its audio
+// path on roughly 1-in-20..40 uniform trim steps; fine steps are silent).
+// The clamp keeps the designated line's tail count (hundreds of px) far
+// from zero and the 12-bit RAW_REPEAT ceiling.
+#define HTRIM_FINE_LIMIT_PX 64
 static uint32_t *htrim_word[HTRIM_MAX_SLOTS];
 static uint16_t htrim_base[HTRIM_MAX_SLOTS];
 static uint8_t htrim_slots;
 static int16_t htrim_px;
+static int16_t htrim_fine_px;
 
 #if PICO_HDMI_VBLANK_HTRIM
 // ============================================================================
@@ -1144,8 +1155,7 @@ static void htrim_register(uint32_t *buf, uint32_t len, uint8_t *slots)
     // line and always < one full line. A fixed 1200-1600 px window only
     // ever matched the (now-deleted) 720p timing; at 480p the big repeat is
     // 688 px and never matched, silently disabling the whole servo.
-    const uint32_t rt_h_total =
-        (uint32_t)rt_h_front_porch + rt_h_sync_width + rt_h_back_porch + rt_h_active_pixels;
+    const uint32_t rt_h_total = (uint32_t)rt_h_front_porch + rt_h_sync_width + rt_h_back_porch + rt_h_active_pixels;
     for (uint32_t i = 0; i < len && *slots < HTRIM_MAX_SLOTS; i++) {
         const uint32_t count = buf[i] & 0xFFFU;
         if ((buf[i] >> 12) == 0x1 && count >= (rt_h_total / 2) && count < rt_h_total) {
@@ -1163,8 +1173,10 @@ static void htrim_register_all(void)
     // whenever templates are rebuilt, and a rebuild must not reset the servo
     // to zero mid-genlock.
     const int prev_px = htrim_px;
+    const int prev_fine = htrim_fine_px;
     htrim_slots = 0;
     htrim_px = 0;
+    htrim_fine_px = 0;
     uint8_t slots = 0;
     htrim_register(vblank_line_vsync_off, 9, &slots);
     htrim_register(vblank_line_vsync_on, 9, &slots);
@@ -1205,6 +1217,11 @@ static void htrim_register_all(void)
     if (prev_px) {
         video_output_set_vblank_htrim_px(prev_px);
     }
+    if (prev_fine) {
+        // AFTER the coarse restore so the single line's tail carries both
+        // stages (the fine setter re-patches it with px + fine).
+        video_output_set_vblank_htrim_fine_px(prev_fine);
+    }
 }
 
 int video_output_get_vblank_htrim_slots(void)
@@ -1216,6 +1233,26 @@ int video_output_get_vblank_htrim_px(void)
 {
     return (int)htrim_px;
 }
+
+#if PICO_HDMI_VBLANK_HTRIM
+// Out-of-line (__scratch_y, noinline) poster for the fine-trim line:
+// SCRATCH_X is at its link budget (see db_fill_arm_fire's precedent), and
+// this runs once per frame, so the call overhead is irrelevant.
+static void __scratch_y("") __attribute__((noinline)) htrim_fine_post(dma_channel_hw_t *ch)
+{
+    ch->read_addr = (uintptr_t)vblank_elastic;
+    ch->transfer_count = vblank_elastic_len;
+}
+
+// Keep the fine-stage single line consistent with BOTH trim stages: it
+// replaces an ordinary (uniformly trimmed) blanking line, so its tail must
+// carry base + uniform px + fine px.
+static void htrim_fine_patch_word(void)
+{
+    vblank_elastic[vblank_elastic_len - 3] =
+        (0x1U << 12) | (uint32_t)((int32_t)htrim_elastic_base + (int32_t)htrim_px + (int32_t)htrim_fine_px);
+}
+#endif
 
 // Trim every blanking line by `px` pixel clocks (clamped). Safe to call from
 // the vsync callback: single aligned word writes, picked up by the lines
@@ -1247,6 +1284,41 @@ void video_output_set_vblank_htrim_px(int px)
     for (uint32_t i = 0; i < htrim_slots; i++) {
         *htrim_word[i] = (0x1U << 12) | (uint32_t)(htrim_base[i] + px);
     }
+#if PICO_HDMI_VBLANK_HTRIM
+    // The fine-stage single line is posted unconditionally (see the
+    // blanking handler), so its tail must track the uniform trim too.
+    htrim_fine_patch_word();
+#endif
+}
+
+// Fine (single-line) trim stage: apply `px` EXTRA pixel clocks to one
+// designated ordinary-blanking line, on top of the uniform per-line trim.
+// A 1 px step here changes the frame period by one pixel clock, so a servo
+// hunting in fine units never shows the sink a measurable timing change.
+// Same calling rules as video_output_set_vblank_htrim_px(). No-op while the
+// (retired) elastic mode owns the single line, and in non-VBLANK_HTRIM
+// builds.
+void video_output_set_vblank_htrim_fine_px(int px)
+{
+#if PICO_HDMI_VBLANK_HTRIM
+    if (px > HTRIM_FINE_LIMIT_PX)
+        px = HTRIM_FINE_LIMIT_PX;
+    if (px < -HTRIM_FINE_LIMIT_PX)
+        px = -HTRIM_FINE_LIMIT_PX;
+    if (htrim_elastic_mode)
+        return;
+    if ((int16_t)px == htrim_fine_px)
+        return;
+    htrim_fine_px = (int16_t)px;
+    htrim_fine_patch_word();
+#else
+    (void)px;
+#endif
+}
+
+int video_output_get_vblank_htrim_fine_px(void)
+{
+    return (int)htrim_fine_px;
 }
 
 #if PICO_HDMI_PRECOMPOSED_ACTIVE_LINES
@@ -1372,8 +1444,8 @@ static void __attribute__((noinline, noclone)) __scratch_y("")
     db_resolve_active_read_ptr(uint32_t line_mod3, uint32_t active_line)
 {
     db_active_read_ptr = ((g_scanline_level != 0U) && (line_mod3 != 1U) && (active_line > 2U))
-                              ? db_dim_buffers[db_front_idx]
-                              : db_buffers[db_front_idx];
+                             ? db_dim_buffers[db_front_idx]
+                             : db_buffers[db_front_idx];
 }
 
 static inline void __scratch_x("")
@@ -1548,6 +1620,24 @@ static inline void __scratch_x("")
             ch->read_addr = (uintptr_t)vblank_di_null;
             ch->transfer_count = vblank_di_null_len;
 #else
+#if PICO_HDMI_VBLANK_HTRIM
+            // Hybrid fine trim stage: the designated line (v_scanline 1,
+            // constant -- see build_all_command_lists()) always goes out as
+            // the pre-patched single-line template, carrying uniform px +
+            // fine px (both setters keep its tail current), and never
+            // carries an audio island (a packet due on this line goes out
+            // one line later; the pacing accumulator in hstx_di_queue
+            // simply holds it, with no rate impact). Checked FIRST so the
+            // dynamic DI path below stays fine-free -- this whole handler
+            // lives in the scratch_x budget. The retired 240p elastic
+            // mode's ISR posting was removed when the fine stage took over
+            // the single-line plumbing (htrim_elastic_mode is forced
+            // false; its non-ISR machinery remains for reference).
+            if (v_scanline == 1) {
+                htrim_fine_post(ch);
+                return;
+            }
+#endif
             const uint32_t *di_words = hstx_di_queue_get_audio_packet();
             if (di_words) {
                 uint32_t *buf = dma_pong ? vblank_di_ping : vblank_di_pong;
@@ -1562,32 +1652,13 @@ static inline void __scratch_x("")
                 // lines. Tail is always the last 3 words for both
                 // build_line_with_di() and build_line_with_di_backporch()
                 // when active==false: [RAW_REPEAT|count, sync, NOP].
-                //
-                // 240p elastic mode: only the single designated line carries
-                // the (much larger) whole-frame correction; every other
-                // ordinary-blanking line -- including dynamically-built
-                // audio-DI lines -- stays untouched at its base period.
-                if (htrim_elastic_mode) {
-                    if (v_scanline == htrim_elastic_scanline) {
-                        buf[vblank_di_len - 3] += (uint32_t)htrim_elastic_total;
-                    }
-                } else {
-                    buf[vblank_di_len - 3] += (uint32_t)(int32_t)htrim_px;
-                }
+                buf[vblank_di_len - 3] += (uint32_t)(int32_t)htrim_px;
 #endif
                 ch->read_addr = (uintptr_t)buf;
                 ch->transfer_count = vblank_di_len;
             } else {
-#if PICO_HDMI_VBLANK_HTRIM
-                if (htrim_elastic_mode && v_scanline == htrim_elastic_scanline) {
-                    ch->read_addr = (uintptr_t)vblank_elastic;
-                    ch->transfer_count = vblank_elastic_len;
-                } else
-#endif
-                {
-                    ch->read_addr = (uintptr_t)vblank_di_null;
-                    ch->transfer_count = vblank_di_null_len;
-                }
+                ch->read_addr = (uintptr_t)vblank_di_null;
+                ch->transfer_count = vblank_di_null_len;
             }
 #endif
         }
@@ -2020,13 +2091,18 @@ static void build_all_command_lists(const video_mode_t *mode)
     // uniform-trim path as 480p/720p. Machinery kept compiled but dormant
     // for possible reuse.
     htrim_elastic_mode = false;
-    if (htrim_elastic_mode) {
-        htrim_elastic_scanline = 1; // see line-map comment above htrim_elastic_mode
-        htrim_elastic_gain = (uint16_t)(mode->v_total_lines - mode->v_active_lines);
-    }
+    // The single-line machinery is reused by the hybrid FINE trim stage
+    // (video_output_set_vblank_htrim_fine_px()), so its line selection is
+    // set up unconditionally: v_scanline 1 is an ordinary front-porch-tail
+    // blanking line in every supported raster (line 0 carries the AVI
+    // infoframe), visited every frame regardless of genlock's ±1 vtotal
+    // step (wraparound always revisits the low scanlines first).
+    htrim_elastic_scanline = 1;
+    htrim_elastic_gain = (uint16_t)(mode->v_total_lines - mode->v_active_lines);
 #endif
     uint8_t vic = (mode->v_active_lines == 480 && mode->h_active_pixels == 640) ? 1 : 0;
-    if (mode->v_active_lines == 720 && mode->h_total_pixels == 1650) vic = 4;
+    if (mode->v_active_lines == 720 && mode->h_total_pixels == 1650)
+        vic = 4;
 #if PICO_HDMI_LEGACY_240P_AVI_INFOFRAME
     uint8_t pixel_repetition = 0;
 #else
@@ -2392,20 +2468,26 @@ void video_output_update_acr(uint32_t pixel_clock_hz)
 void video_output_htrim_update_audio_pacing(void)
 {
     static int16_t pacing_px_applied;
+    static int16_t pacing_fine_applied;
     static uint16_t pacing_vtotal_applied;
     const int16_t px = htrim_px;
+    const int16_t fine = htrim_fine_px;
     const uint16_t v_total = rt_v_total_lines;
-    if (px == pacing_px_applied && v_total == pacing_vtotal_applied) {
+    if (px == pacing_px_applied && fine == pacing_fine_applied && v_total == pacing_vtotal_applied) {
         return;
     }
     pacing_px_applied = px;
+    pacing_fine_applied = fine;
     pacing_vtotal_applied = v_total;
 
     const uint32_t h_total = video_output_active_mode->h_total_pixels;
     const uint32_t v_active = rt_v_active_lines;
     const uint32_t pclk = clock_get_hz(clk_hstx) / video_output_active_mode->hstx_csr_clkdiv;
 
-    int64_t frame_px = (int64_t)h_total * v_total + (int64_t)px * (int32_t)(v_total - v_active);
+    // The fine (single-line) trim stage adds exactly `fine` pixels to one
+    // blanking line per frame, so it enters the true frame pixel count as a
+    // plain additive term.
+    int64_t frame_px = (int64_t)h_total * v_total + (int64_t)px * (int32_t)(v_total - v_active) + fine;
     uint64_t num = ((uint64_t)current_sample_rate * (uint64_t)frame_px) << 16;
     uint64_t den64 = (uint64_t)v_total * pclk;
     uint32_t spl = (uint32_t)(num / den64);

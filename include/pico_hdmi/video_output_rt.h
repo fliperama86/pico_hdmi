@@ -168,6 +168,13 @@ void video_output_request_resync(void);
 void video_output_set_vblank_htrim_px(int px);
 int video_output_get_vblank_htrim_slots(void); // 0 = registration found nothing
 int video_output_get_vblank_htrim_px(void);    // current applied (clamped) trim
+// Fine (single-line) trim stage: `px` EXTRA pixel clocks on one designated
+// ordinary-blanking line, on top of the uniform per-line trim above. One
+// step changes the frame period by a single pixel clock, so a servo hunting
+// in fine units is invisible to sink input re-measurement. Clamped to
+// +/-64 px; no-op in non-VBLANK_HTRIM builds.
+void video_output_set_vblank_htrim_fine_px(int px);
+int video_output_get_vblank_htrim_fine_px(void);
 
 // Recompute audio Data Island pacing from the current (htrim-trimmed) raster;
 // call from a non-ISR (Core 1 background) context whenever trim or vtotal changes.
