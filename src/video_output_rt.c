@@ -1235,13 +1235,20 @@ int video_output_get_vblank_htrim_px(void)
 }
 
 #if PICO_HDMI_VBLANK_HTRIM
-// Out-of-line (__scratch_y, noinline) poster for the fine-trim line:
-// SCRATCH_X is at its link budget (see db_fill_arm_fire's precedent), and
-// this runs once per frame, so the call overhead is irrelevant.
-static void __scratch_y("") __attribute__((noinline)) htrim_fine_post(dma_channel_hw_t *ch)
+// Out-of-line poster for the two fixed low blanking lines: the AVI
+// infoframe line (v_scanline 0) and the fine-trim single line (1). NOT in
+// either scratch bank (both sit at their link budgets in the fullest
+// firmware configurations); __not_in_flash keeps it XIP-safe. Runs twice
+// per frame, stores only -- placement is not latency-critical.
+static void __not_in_flash_func(htrim_low_post)(dma_channel_hw_t *ch, uint32_t v_scanline)
 {
-    ch->read_addr = (uintptr_t)vblank_elastic;
-    ch->transfer_count = vblank_elastic_len;
+    if (v_scanline == 0) {
+        ch->read_addr = (uintptr_t)vblank_avi_infoframe;
+        ch->transfer_count = vblank_avi_infoframe_len;
+    } else {
+        ch->read_addr = (uintptr_t)vblank_elastic;
+        ch->transfer_count = vblank_elastic_len;
+    }
 }
 
 // Keep the fine-stage single line consistent with BOTH trim stages: it
@@ -1578,6 +1585,21 @@ static inline void __scratch_x("")
     }
 }
 
+// Out-of-line (__scratch_y, noinline) ACR-line poster: the two-way template
+// choice costs ~24 bytes of SCRATCH_X inlined, and that bank sits at its
+// link budget in the fullest firmware configurations. A few calls per
+// frame, stores only.
+static void __scratch_y("") __attribute__((noinline)) acr_off_post(dma_channel_hw_t *ch)
+{
+    if (use_genlock_acr) {
+        ch->read_addr = (uintptr_t)genlock_acr_vsync_off;
+        ch->transfer_count = genlock_acr_vsync_off_len;
+    } else {
+        ch->read_addr = (uintptr_t)vblank_acr_vsync_off;
+        ch->transfer_count = vblank_acr_vsync_off_len;
+    }
+}
+
 static inline void __scratch_x("")
     video_output_handle_blanking(dma_channel_hw_t *ch, uint32_t v_scanline, bool send_acr, bool dma_pong)
 {
@@ -1589,17 +1611,23 @@ static inline void __scratch_x("")
         ch->transfer_count = 9;
     } else {
         if (send_acr) {
-            if (use_genlock_acr) {
-                ch->read_addr = (uintptr_t)genlock_acr_vsync_off;
-                ch->transfer_count = genlock_acr_vsync_off_len;
-            } else {
-                ch->read_addr = (uintptr_t)vblank_acr_vsync_off;
-                ch->transfer_count = vblank_acr_vsync_off_len;
-            }
+            acr_off_post(ch);
+#if PICO_HDMI_VBLANK_HTRIM
+        } else if (v_scanline <= 1) {
+            // AVI infoframe line (0) or the fine-trim single line (1):
+            // fixed templates, posted out-of-line to keep this scratch_x
+            // handler under its link budget. Line 1 is checked here, ahead
+            // of BOTH DI paths, so the fine line always goes out and the
+            // exact-pacing "+fine" term stays truthful (a packet due on
+            // line 1 goes out a line later; the accumulator holds it).
+            htrim_low_post(ch, v_scanline);
+        } else {
+#else
         } else if (v_scanline == 0) {
             ch->read_addr = (uintptr_t)vblank_avi_infoframe;
             ch->transfer_count = vblank_avi_infoframe_len;
         } else {
+#endif
 #if PICO_HDMI_PRECOMPOSED_ACTIVE_LINES
             if (compose_ring_built) {
                 const uint32_t *di = hstx_di_queue_get_audio_packet();
@@ -1620,24 +1648,6 @@ static inline void __scratch_x("")
             ch->read_addr = (uintptr_t)vblank_di_null;
             ch->transfer_count = vblank_di_null_len;
 #else
-#if PICO_HDMI_VBLANK_HTRIM
-            // Hybrid fine trim stage: the designated line (v_scanline 1,
-            // constant -- see build_all_command_lists()) always goes out as
-            // the pre-patched single-line template, carrying uniform px +
-            // fine px (both setters keep its tail current), and never
-            // carries an audio island (a packet due on this line goes out
-            // one line later; the pacing accumulator in hstx_di_queue
-            // simply holds it, with no rate impact). Checked FIRST so the
-            // dynamic DI path below stays fine-free -- this whole handler
-            // lives in the scratch_x budget. The retired 240p elastic
-            // mode's ISR posting was removed when the fine stage took over
-            // the single-line plumbing (htrim_elastic_mode is forced
-            // false; its non-ISR machinery remains for reference).
-            if (v_scanline == 1) {
-                htrim_fine_post(ch);
-                return;
-            }
-#endif
             const uint32_t *di_words = hstx_di_queue_get_audio_packet();
             if (di_words) {
                 uint32_t *buf = dma_pong ? vblank_di_ping : vblank_di_pong;
