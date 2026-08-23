@@ -243,7 +243,18 @@ const video_mode_t video_mode_480_p = {
     .h_sync_width = 96,
     .h_back_porch = 48,
     .h_active_pixels = 640,
-    .v_front_porch = 10,
+    // Vertical blanking sits at the TOP of the frame counter (v_scanline 0 is
+    // the first front-porch line; active video runs from front+sync+back up to
+    // v_total -- see get_scanline_state()). Lines of v_total ABOVE that sum are
+    // bottom-of-frame blanking, and they are the only slack a genlock servo has
+    // when it shortens the frame by writing rt_v_total_lines: a vtotal below the
+    // sum wraps before the last active line, and the sink measures 479p. So the
+    // front porch is 2 lines short of the VESA 10, putting the sum at 523 --
+    // clear of the SNES genlock nominal 524 (GENLOCK_NOMINAL_VTOTAL_480) and of
+    // its acquire step down to 523. Invisible on the wire: v_total is unchanged,
+    // so those 2 lines just move from the head of the counter to its tail and
+    // every sync edge lands exactly where it did before.
+    .v_front_porch = 8,
     .v_sync_width = 2,
     .v_back_porch = 33,
     .v_active_lines = 480,
@@ -265,7 +276,13 @@ const video_mode_t video_mode_240_p = {
     .h_sync_width = 192,
     .h_back_porch = 96,
     .h_active_pixels = 1280,
-    .v_front_porch = 4,
+    // One line short of the NTSC 4 for the top-pinned-blanking reason spelled
+    // out at video_mode_480_p: the sum front+sync+back+active must clear the
+    // genlock nominal minus one acquire step. SNES genlocks 240p on THIS raster
+    // at nominal 262 (GENLOCK_NOMINAL_VTOTAL_240), so the sum has to be <= 261.
+    // Free, as at 480p: v_total is unchanged, so the line moves from the head of
+    // the frame counter to its tail and the waveform is untouched.
+    .v_front_porch = 3,
     .v_sync_width = 4,
     .v_back_porch = 14,
     .v_active_lines = 240,
@@ -276,7 +293,10 @@ const video_mode_t video_mode_240_p = {
     // reasoning as 480p above) defines PICO_HDMI_240P_HSTX_CLK_DIV=2 to keep
     // pixel/signal identical (clk_hstx stays 126 MHz; only clk_sys speeds up).
     // Unconditional (not genlock-specific): this is the standard-timing 240p
-    // descriptor, used whenever genlock is off (default) or not built.
+    // descriptor, used whenever genlock is off (default) or not built, and on
+    // SNES also WITH genlock -- 25.2M/(1600*262) = 60.115 Hz is already the
+    // SNES rate (the same frame period as its 480p nominal, 800*524 ==
+    // 1600*262), so it has no use for the MVS-retimed raster below.
     .hstx_clk_div = PICO_HDMI_240P_HSTX_CLK_DIV,
     .hstx_csr_clkdiv = 5,
     .hsync_positive = false,
@@ -331,9 +351,18 @@ const video_mode_t video_mode_720_p = {
     .h_sync_width = 32,
     .h_back_porch = 80,
     .h_active_pixels = 1280,
-    .v_front_porch = 3,
+    // Same top-pinned-blanking constraint as video_mode_480_p above: the sum
+    // front+sync+back+active must stay at or below the genlock nominal minus one
+    // acquire step. The CVT-RB 3/5/13 put it at 741, two lines over the SNES 740
+    // nominal (GENLOCK_NOMINAL_VTOTAL_720), so 720p measured as 719p. One line
+    // comes off the front porch (free -- v_total is unchanged, so it moves to the
+    // tail of the counter) and one off the back porch, which lifts the picture by
+    // a line inside the blanking. The front porch may not go below 2: v_scanline
+    // 0 and 1 carry the AVI infoframe and the fine-htrim line, and both must be
+    // ordinary blanking (see video_output_handle_blanking()).
+    .v_front_porch = 2,
     .v_sync_width = 5,
-    .v_back_porch = 13,
+    .v_back_porch = 12,
     .v_active_lines = 720,
     .h_total_pixels = 1440,
     .v_total_lines = 741,
