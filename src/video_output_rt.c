@@ -364,6 +364,55 @@ const video_mode_t video_mode_240_p_genlock = {
 };
 #endif
 
+#if PICO_HDMI_240P_SNES_GENLOCK_RASTER
+// SNES genlock 240p raster, retimed so the servo's STANDING TRIM lands on zero.
+//
+// The stock 1600x262 raster runs 60.1145 Hz against the SNES's 60.0988, which
+// is 109 pixel clocks of frame error. htrim can only lengthen BLANKING lines,
+// so nulling that costs ~5 px on each of 22 blanking lines while the 240 active
+// lines stay at h_total. Since 240p announces AVI VIC 0, a sink has to
+// auto-measure, and a measurement window that is not frame-aligned averages
+// those two line lengths in varying proportion -- a RetroTink 4K in Proportional
+// scaling then blips its horizontal factor by ~1 px, continuously (bench
+// 2026-08-22; forcing trim to 0 stopped it, and 480p is immune only because
+// VIC 1 means it never measures).
+//
+// 1619x259 = 419,321 px against an ideal 419,309, so 12 px of error over 19
+// blanking lines: a standing trim of -0.6 px, i.e. the servo parks at 0 and
+// every line in the frame is the same length. No sawtooth to measure.
+// This is the ONLY combination in the whole search space (h_total 1560-1700,
+// v_total 258-275, h_blank >= 300) that lands under 2 px of standing trim.
+//
+// Porches: the 19 extra horizontal pixels go on the FRONT porch, which is free
+// -- active video is positioned from the sync edge, so only the line period
+// grows. Vertically the invariant is front+sync+back+active <= nominal-1, and
+// nominal is 259, so the three porches must fit in 18 where the stock raster
+// uses 21. v_front 3->2 is free (2 is the floor: v_scanline 0 and 1 carry the
+// AVI infoframe and the fine-htrim line). The remaining 2 come off the back
+// porch, which does shift the picture up by 2 lines.
+//
+// Line rate is 25.2M/1619 = 15.57 kHz, about 1.1% below NTSC's 15.734 kHz.
+// Sinks auto-measure this mode anyway, but a narrow 240p detection window is
+// the plausible failure mode if this raster is ever rejected.
+const video_mode_t video_mode_240_p_snes_genlock = {
+    .h_front_porch = 51,
+    .h_sync_width = 192,
+    .h_back_porch = 96,
+    .h_active_pixels = 1280,
+    .v_front_porch = 2,
+    .v_sync_width = 4,
+    .v_back_porch = 12,
+    .v_active_lines = 240,
+    .h_total_pixels = 1619,
+    .v_total_lines = 259,
+    .hstx_clk_div = PICO_HDMI_240P_HSTX_CLK_DIV,
+    .hstx_csr_clkdiv = 5,
+    .hsync_positive = false,
+    .vsync_positive = false,
+    .data_island_in_hsync = true,
+};
+#endif
+
 // Exact-clock 1280x720 CVT reduced blanking. The normal runtime firmware uses
 // a 320 MHz system/HSTX clock, so CSR /5 gives an exact 64 MHz pixel clock.
 // This is a non-CTA 59.979 Hz timing with H+/V- sync and VIC 0 metadata.

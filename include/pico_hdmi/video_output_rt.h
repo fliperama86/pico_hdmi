@@ -40,6 +40,13 @@ extern const video_mode_t video_mode_240_p;
 // opted into genlock via the OSD (persisted setting, default off).
 extern const video_mode_t video_mode_240_p_genlock;
 #endif
+#if PICO_HDMI_240P_SNES_GENLOCK_RASTER
+// SNES genlock 240p raster (1619x259), retimed so the htrim servo's standing
+// trim parks at zero and blanking lines stop differing from active ones; see
+// the block comment on its definition in video_output_rt.c for why that
+// matters to a VIC-0 auto-measuring sink.
+extern const video_mode_t video_mode_240_p_snes_genlock;
+#endif
 extern const video_mode_t video_mode_720_p;
 // Dormant CEA VIC 4 720p timing (classic 1280x720, 74.25 MHz nominal); see
 // video_output_rt.c. Not currently selected anywhere; kept for a possible
