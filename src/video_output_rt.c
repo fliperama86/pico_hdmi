@@ -61,6 +61,27 @@
 #define PICO_HDMI_LEGACY_240P_AVI_INFOFRAME 0
 #endif
 
+// Pixel repetition announced for 240p, decoupled from the AVI PB1/PB2 payload
+// above so the two can be chosen independently. They used to move together,
+// which made "legacy payload" and "PR=0" indistinguishable: a bench test that
+// turned the legacy payload off ALSO turned PR on, so a resulting black screen
+// could not be attributed to either one. The defaults below reproduce both
+// historical combinations exactly, and the interesting third point -- declare
+// the 4:3 picture aspect (PB2=0x18) while leaving PR at 0 -- is now reachable.
+//
+// Why it matters: 240p is VIC 0, and the legacy payload declares M1:M0 = 00,
+// "no picture aspect ratio". A sink then has nothing to frame 1280x240 with and
+// falls back to square pixels, which no scaler-side 4:3 setting can correct
+// because there is no declared aspect to correct. 480p is unaffected: VIC 1 is
+// defined as 640x480p 4:3, so its aspect arrives with the VIC.
+#ifndef PICO_HDMI_240P_PIXEL_REPETITION
+#if PICO_HDMI_LEGACY_240P_AVI_INFOFRAME
+#define PICO_HDMI_240P_PIXEL_REPETITION 0
+#else
+#define PICO_HDMI_240P_PIXEL_REPETITION 3
+#endif
+#endif
+
 // Elastic-blanking htrim registration/patching (see htrim_register_all() and
 // video_output_set_vblank_htrim_px()). Off by default: in the default
 // (non-genlock) build, scratch_x is exactly full, so no new code may reach
@@ -2142,11 +2163,9 @@ static void build_all_command_lists(const video_mode_t *mode)
     uint8_t vic = (mode->v_active_lines == 480 && mode->h_active_pixels == 640) ? 1 : 0;
     if (mode->v_active_lines == 720 && mode->h_total_pixels == 1650)
         vic = 4;
-#if PICO_HDMI_LEGACY_240P_AVI_INFOFRAME
-    uint8_t pixel_repetition = 0;
-#else
-    uint8_t pixel_repetition = mode_is_240p ? 3 : 0;
-#endif
+    // Non-240p modes carry PR=0 in every configuration; only 240p is selectable
+    // (see PICO_HDMI_240P_PIXEL_REPETITION above).
+    uint8_t pixel_repetition = mode_is_240p ? PICO_HDMI_240P_PIXEL_REPETITION : 0;
     const bool di_hsync_active = data_island_hsync_active();
     if (mode_is_240p) {
         hstx_packet_set_avi_infoframe(&packet, vic, pixel_repetition);
