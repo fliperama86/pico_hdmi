@@ -1712,14 +1712,25 @@ static inline void __scratch_x("")
         if (send_acr) {
             acr_off_post(ch);
 #if PICO_HDMI_VBLANK_HTRIM
-        } else if (v_scanline <= 1) {
-            // AVI infoframe line (0) or the fine-trim single line (1):
-            // fixed templates, posted out-of-line to keep this scratch_x
-            // handler under its link budget. Line 1 is checked here, ahead
-            // of BOTH DI paths, so the fine line always goes out and the
-            // exact-pacing "+fine" term stays truthful (a packet due on
-            // line 1 goes out a line later; the accumulator holds it).
-            htrim_low_post(ch, v_scanline);
+        } else if (v_scanline == 0) {
+            // AVI infoframe line: fixed template, posted out-of-line to keep
+            // this scratch_x handler under its link budget.
+            htrim_low_post(ch, 0);
+        } else if (v_scanline == 1 && (htrim_px != 0 || htrim_fine_px != 0)) {
+            // Fine-trim single line: post the elastic template ONLY while there
+            // is actual trim to carry (genlock engaged). When both stages are
+            // zero -- every genlock-disabled build (e.g. SNES), and a perfectly
+            // centred servo -- fall through so v_scanline 1 is an ordinary
+            // audio-bearing blanking line instead. Posting the elastic (null-DI)
+            // line here every frame with no trim to apply made recent RetroTink
+            // 4K firmware chop 720p audio; a normal blanking line does not, and
+            // lenient sinks were unaffected either way. Line 1 stays checked
+            // ahead of BOTH DI paths so the exact-pacing "+fine" term stays
+            // truthful when the elastic line IS posted (a packet due on line 1
+            // goes out a line later; the accumulator holds it). Genlock-on is
+            // unchanged: its coarse trim is non-zero at steady state, so the
+            // elastic line is still posted every frame exactly as before.
+            htrim_low_post(ch, 1);
         } else {
 #else
         } else if (v_scanline == 0) {
@@ -1938,13 +1949,33 @@ static void video_output_service_double_buffer_fill(void)
     // work rather than add it.
     //
     // The switch selects one of four SEPARATE tight loops, never a per-pixel
-    // branch: __uhadd8 halves each byte lane independently (UHADD8:
-    // res[i] = (a[i] + b[i]) >> 1, no masking, no cross-channel bleed),
-    // composed to match video_pipeline.h's per-8-bit-channel formulas exactly
-    // -- 50% (level 2) is a single uhadd8(v,0); 25%/75% compose two; 100%
-    // (fully black) needs none and must stay a store-only loop, since that is
-    // the cheapest kernel here and turning it into a load-modify-store was
-    // among the changes that broke the budget.
+    // branch. Under RGB888 (one 8:8:8 pixel per word) __uhadd8 halves each
+    // byte lane independently (UHADD8: res[i] = (a[i] + b[i]) >> 1, no
+    // masking, no cross-channel bleed), composed to match video_pipeline.h's
+    // per-8-bit-channel formulas exactly -- 50% (level 2) is a single
+    // uhadd8(v,0); 25%/75% compose two; 100% (fully black) needs none and
+    // must stay a store-only loop, since that is the cheapest kernel here and
+    // turning it into a load-modify-store was among the changes that broke
+    // the budget.
+    //
+    // Under RGB565 (two 5:6:5 pixels per word, the SNES build) byte lanes are
+    // NOT channels, so uhadd8 mixes colour bits across field boundaries: it
+    // bled red into green and green into blue on every dimmed row, which is
+    // what "messed colours + dark lines" at 720p was. The RGB565 kernels
+    // below shift the whole word instead and mask off the bits that crossed a
+    // field boundary, which is exact per-channel truncating division for
+    // powers of two -- 0x7BEF clears the two bits that >>1 carries in (the
+    // green MSB and the blue MSB), 0x39E7 the four that >>2 carries in.
+    //
+    // This does cost one more ALU op per word than the RGB888 kernels, but
+    // NOT more per line: an RGB565 word is two pixels, so these loops run
+    // half as many iterations over half as many loads and stores. Every level
+    // below is <= the total op count of the RGB888 kernel it replaces, which
+    // is the budget the 2026-08-06 measurement above validated. Level 1 is
+    // the one exception to exactness: its RGB888 form composes two uhadd8 as
+    // (v + (v>>1)) >> 1, whose intermediate overflows a 5-bit field when
+    // packed, so it is expressed as the borrow-free v - (v>>2) instead -- the
+    // same 3/4, differing from the 480p ladder by at most one LSB.
     if (g_scanline_level != 0U) {
         // dst32 (== db_fill_dst) is one of db_buffers[0]/db_buffers[1] by
         // construction (see the arm site above); derive the matching
@@ -1957,6 +1988,7 @@ static void video_output_service_double_buffer_fill(void)
 #else
         const uint32_t dim_words = rt_h_active_pixels / 2U;
 #endif
+#if PICO_HDMI_PIXEL_FORMAT_RGB888
         switch (g_scanline_level) {
             case 1U: // 25% strength -> 75% brightness: uhadd8(v, uhadd8(v,0))
                 for (uint32_t i = 0; i < dim_words; i++) {
@@ -1979,6 +2011,34 @@ static void video_output_service_double_buffer_fill(void)
                 }
                 break;
         }
+#else
+        // Packed RGB565: >>1 carries the red LSB into the green field and the
+        // green LSB into the blue field, >>2 carries two of each. The masks
+        // clear exactly those carried-in bits, in both pixels of the word.
+        switch (g_scanline_level) {
+            case 1U: // 25% strength -> 75% brightness: v - v/4 (borrow-free per field)
+                for (uint32_t i = 0; i < dim_words; i++) {
+                    const uint32_t v = dst32[i];
+                    dim32[i] = v - ((v >> 2) & 0x39E739E7U);
+                }
+                break;
+            case 3U: // 75% strength -> 25% brightness
+                for (uint32_t i = 0; i < dim_words; i++) {
+                    dim32[i] = (dst32[i] >> 2) & 0x39E739E7U;
+                }
+                break;
+            case 4U: // 100% strength: fully black, store-only (cheapest kernel, keep it that way)
+                for (uint32_t i = 0; i < dim_words; i++) {
+                    dim32[i] = 0U;
+                }
+                break;
+            default: // 2U: 50% strength -> 50% brightness
+                for (uint32_t i = 0; i < dim_words; i++) {
+                    dim32[i] = (dst32[i] >> 1) & 0x7BEF7BEFU;
+                }
+                break;
+        }
+#endif
     }
 }
 
