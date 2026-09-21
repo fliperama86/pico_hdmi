@@ -19,6 +19,14 @@
 #define PICO_HDMI_AVI_RGB_FULL_RANGE 1
 #endif
 
+// AVI content type (CTA-861-D): ITC=1 in PB3 with CN1:CN0 = Game in PB5, on
+// every mode. Sinks that key low-latency/game processing off the AVI (the
+// pre-ALLM generation) act on it; others ignore it. Off by default so the
+// library stays neutral; a consumer that is a game source turns it on.
+#ifndef PICO_HDMI_AVI_CONTENT_TYPE_GAME
+#define PICO_HDMI_AVI_CONTENT_TYPE_GAME 0
+#endif
+
 // ============================================================================
 // TERC4 Symbol Table (4-bit to 10-bit encoding)
 // ============================================================================
@@ -279,6 +287,40 @@ void hstx_packet_set_avi_infoframe_aspect(hstx_packet_t *packet, uint8_t vic, ui
     packet->subpacket[0][3] = PICO_HDMI_AVI_RGB_FULL_RANGE ? 0x08 : 0x00;
     packet->subpacket[0][4] = vic;
     packet->subpacket[0][5] = pixel_repetition & 0x0F;
+#if PICO_HDMI_AVI_CONTENT_TYPE_GAME
+    // PB3 bit 7: ITC (IT content). PB5 bits 5:4: CN = 11, Game. CN is only
+    // meaningful with ITC set, so the two always move together.
+    packet->subpacket[0][3] |= 0x80;
+    packet->subpacket[0][5] |= 0x30;
+#endif
+
+    compute_infoframe_checksum(packet);
+    compute_all_parity(packet);
+}
+
+// SPD InfoFrame: type 0x83, version 1, 25 payload bytes -- PB1..PB8 vendor,
+// PB9..PB24 product, PB25 Source Device Information. Payload byte n lives at
+// subpacket[n / 7][n % 7] (PB0 is the checksum), the same layout
+// compute_infoframe_checksum() walks. hstx_packet_init() has already zeroed
+// the packet, so unused characters are the zero padding CTA-861 asks for.
+static void spd_put_string(hstx_packet_t *packet, int pb_first, const char *s, int max_len)
+{
+    for (int i = 0; i < max_len && s != NULL && s[i] != '\0'; i++) {
+        const int n = pb_first + i;
+        packet->subpacket[n / 7][n % 7] = (uint8_t)s[i];
+    }
+}
+
+void hstx_packet_set_spd_infoframe(hstx_packet_t *packet, const char *vendor, const char *product, uint8_t device_info)
+{
+    hstx_packet_init(packet);
+    packet->header[0] = 0x83;
+    packet->header[1] = 0x01;
+    packet->header[2] = 0x19;
+
+    spd_put_string(packet, 1, vendor, 8);
+    spd_put_string(packet, 9, product, 16);
+    packet->subpacket[25 / 7][25 % 7] = device_info;
 
     compute_infoframe_checksum(packet);
     compute_all_parity(packet);

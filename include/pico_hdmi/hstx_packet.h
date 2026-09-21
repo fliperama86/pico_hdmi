@@ -41,6 +41,17 @@ void hstx_packet_set_audio_infoframe(hstx_packet_t *packet, uint32_t sample_rate
 void hstx_packet_set_avi_infoframe(hstx_packet_t *packet, uint8_t vic, uint8_t pixel_repetition);
 void hstx_packet_set_avi_infoframe_aspect(hstx_packet_t *packet, uint8_t vic, uint8_t pixel_repetition,
                                           bool aspect_16_9);
+// SPD (Source Product Description) InfoFrame, CTA-861: an 8-character vendor
+// name, a 16-character product description and a Source Device Information
+// code. Sinks show them as the input's name/icon; some also pick a game or PC
+// picture mode from the device code. Longer strings are truncated, shorter
+// ones zero-padded.
+#define HSTX_SPD_DEVICE_UNKNOWN 0x00
+#define HSTX_SPD_DEVICE_DIGITAL_STB 0x01
+#define HSTX_SPD_DEVICE_DVD_PLAYER 0x02
+#define HSTX_SPD_DEVICE_GAME 0x08
+#define HSTX_SPD_DEVICE_PC 0x09
+void hstx_packet_set_spd_infoframe(hstx_packet_t *packet, const char *vendor, const char *product, uint8_t device_info);
 int hstx_packet_set_audio_samples(hstx_packet_t *packet, const audio_sample_t *samples, int num_samples,
                                   int frame_count);
 // As above, but with a proper IEC 60958 channel status bit sequence

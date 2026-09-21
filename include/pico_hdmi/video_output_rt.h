@@ -205,4 +205,12 @@ void video_output_perf_probe_read(uint32_t *fifo_min, uint32_t *irq_gap_max_us);
 // Safe from Core 0 or the Core 1 background loop; never from an ISR.
 void video_output_set_scanline_level(uint8_t level);
 
+// SPD (Source Product Description) InfoFrame: vendor (8 chars), product
+// (16 chars) and an HSTX_SPD_DEVICE_* code, sent once per frame on the AVI
+// InfoFrame's blanking line as a second Data Island. Call BEFORE
+// video_output_init(): the blanking templates are built there (and rebuilt
+// by video_output_set_mode()), and the strings are copied at call time.
+// Not sent at all until this is called, so existing consumers are unchanged.
+void video_output_set_spd_infoframe(const char *vendor, const char *product, uint8_t device_info);
+
 #endif // VIDEO_OUTPUT_RT_H

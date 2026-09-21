@@ -784,7 +784,9 @@ static uint32_t vblank_acr_vsync_on[64] HSTX_CMDLIST_ATTR;
 static uint32_t vblank_acr_vsync_off[64] HSTX_CMDLIST_ATTR;
 static uint32_t vblank_infoframe_vsync_on[64] HSTX_CMDLIST_ATTR;
 static uint32_t vblank_infoframe_vsync_off[64] HSTX_CMDLIST_ATTR;
-static uint32_t vblank_avi_infoframe[64] HSTX_CMDLIST_ATTR;
+// Sized for TWO islands: the AVI InfoFrame plus, when the consumer set one,
+// the SPD InfoFrame appended after the sync pulse (line_append_second_di()).
+static uint32_t vblank_avi_infoframe[128] HSTX_CMDLIST_ATTR;
 static uint32_t vblank_acr_vsync_on_len, vblank_acr_vsync_off_len;
 static uint32_t vblank_infoframe_vsync_on_len, vblank_infoframe_vsync_off_len;
 static uint32_t vblank_avi_infoframe_len;
@@ -1102,6 +1104,81 @@ static di_line_builder_fn_t rt_build_line_with_di = build_line_with_di;
 #else
 #define BUILD_LINE_WITH_DI(buf, di_words, vsync, active) build_line_with_di((buf), (di_words), (vsync), (active))
 #endif
+
+// ============================================================================
+// Second Data Island on a blanking line
+//
+// Appends an island, with its own preamble and guard bands, to an already
+// built NON-active DI line by splitting the line's trailing control
+// segment: ... [gap][preamble][island][rest]. Everything after the sync pulse
+// on a vertical-blanking line is control period, so an island may sit
+// anywhere in it (HDMI 1.4 5.2.3), and `rest` keeps the line length
+// unchanged. `rest` also remains the line's single "big repeat"
+// (> h_total/2), so htrim_register() still finds and trims it.
+//
+// This is how the SPD InfoFrame ships (video_output_set_spd_infoframe()):
+// as a second island on the AVI line, v_scanline 0. Two reasons, both hard
+// constraints: the scratch_x ISR handlers are at their link budget in the
+// fullest consumer builds, so no new line-selection code may go there; and
+// the shortest supported raster has a 2-line front porch whose lines 0 and 1
+// are both spoken for (AVI, fine trim), so no fixed extra line exists in
+// every mode. The gap keeps well over the >= 4 px of plain control HDMI wants
+// ahead of a preamble. Init-time only, never from the ISR.
+// ============================================================================
+#define SECOND_DI_GAP_PX 32
+
+static uint32_t line_append_second_di(uint32_t *buf, uint32_t len, const uint32_t *di_words, bool vsync)
+{
+    // A non-active DI line always ends RAW_REPEAT(tail), sync_h1, NOP.
+    uint32_t *const tail_cmd = &buf[len - 3];
+    const uint32_t sync_h1 = buf[len - 2];
+    const uint32_t tail = *tail_cmd & 0xFFFU;
+    const uint32_t preamble = vsync ? PREAMBLE_V0_H1 : PREAMBLE_V1_H1;
+    const uint32_t rt_h_total = (uint32_t)rt_h_front_porch + rt_h_sync_width + rt_h_back_porch + rt_h_active_pixels;
+    hard_assert(tail > SECOND_DI_GAP_PX + W_PREAMBLE + W_DATA_ISLAND);
+    const uint32_t rest = tail - SECOND_DI_GAP_PX - W_PREAMBLE - W_DATA_ISLAND;
+    hard_assert(rest >= rt_h_total / 2); // htrim_register()'s match window
+    *tail_cmd = HSTX_CMD_RAW_REPEAT | SECOND_DI_GAP_PX;
+
+    uint32_t *p = &buf[len];
+    *p++ = HSTX_CMD_RAW_REPEAT | W_PREAMBLE;
+    *p++ = preamble;
+    *p++ = HSTX_CMD_NOP;
+
+    *p++ = HSTX_CMD_RAW | W_DATA_ISLAND;
+    for (int i = 0; i < W_DATA_ISLAND; i++)
+        *p++ = di_words[i];
+    *p++ = HSTX_CMD_NOP;
+
+    *p++ = HSTX_CMD_RAW_REPEAT | rest;
+    *p++ = sync_h1;
+    *p++ = HSTX_CMD_NOP;
+    return (uint32_t)(p - buf);
+}
+
+// SPD InfoFrame strings, copied by video_output_set_spd_infoframe() and
+// consumed by build_all_command_lists(). Not sent until set.
+static char spd_vendor[8 + 1];
+static char spd_product[16 + 1];
+static uint8_t spd_device_info;
+static bool spd_enabled;
+
+static void spd_copy(char *dst, size_t dst_size, const char *src)
+{
+    size_t i = 0;
+    for (; src != NULL && src[i] != '\0' && i + 1 < dst_size; i++) {
+        dst[i] = src[i];
+    }
+    dst[i] = '\0';
+}
+
+void video_output_set_spd_infoframe(const char *vendor, const char *product, uint8_t device_info)
+{
+    spd_copy(spd_vendor, sizeof(spd_vendor), vendor);
+    spd_copy(spd_product, sizeof(spd_product), product);
+    spd_device_info = device_info;
+    spd_enabled = true;
+}
 
 typedef struct {
     bool vsync_active;
@@ -2285,6 +2362,14 @@ static void build_all_command_lists(const video_mode_t *mode)
     }
     hstx_encode_data_island(&island, &packet, false, di_hsync_active);
     vblank_avi_infoframe_len = BUILD_LINE_WITH_DI(vblank_avi_infoframe, island.words, false, false);
+    if (spd_enabled) {
+        // Second island, always after the sync pulse whichever side of it the
+        // mode puts the AVI island on, so it is encoded with hsync inactive.
+        hstx_packet_set_spd_infoframe(&packet, spd_vendor, spd_product, spd_device_info);
+        hstx_encode_data_island(&island, &packet, false, false);
+        vblank_avi_infoframe_len =
+            line_append_second_di(vblank_avi_infoframe, vblank_avi_infoframe_len, island.words, false);
+    }
 
     // Null DI command lists
     vblank_di_null_len =
