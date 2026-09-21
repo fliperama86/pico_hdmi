@@ -16,6 +16,13 @@ pico_sdk_init()
 # Use the runtime-mode-switching variant of pico_hdmi (video_output_rt.c).
 set(PICO_HDMI_RUNTIME_MODES ON CACHE BOOL "" FORCE)
 
+# 720p RT uses the active-line double buffer (the deferred-fill scanout path
+# the firmware runs at 1280x720). Build the real 720p RT configuration: the RT
+# path's 720p double-buffer/scanline code references symbols that only exist
+# with this on, so RT + double-buffer-off does not compile and is not a
+# supported 720p combo.
+set(PICO_HDMI_ACTIVE_LINE_DOUBLE_BUFFER ON CACHE BOOL "" FORCE)
+
 # Add pico_hdmi library
 add_subdirectory(../.. pico_hdmi)
 
