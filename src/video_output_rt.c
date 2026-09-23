@@ -413,29 +413,40 @@ const video_mode_t video_mode_240_p_snes_genlock = {
 };
 #endif
 
-// Exact-clock 1280x720 CVT reduced blanking. The normal runtime firmware uses
-// a 320 MHz system/HSTX clock, so CSR /5 gives an exact 64 MHz pixel clock.
-// This is a non-CTA 59.979 Hz timing with H+/V- sync and VIC 0 metadata.
+// Exact-clock 1280x720 reduced blanking at the CEA line period. The normal
+// runtime firmware uses a 320 MHz system/HSTX clock, so CSR /5 gives an exact
+// 64 MHz pixel clock; 1420 pixels per line is then 22.19 us, the same line
+// period as CEA 720p (1650 / 74.25 MHz), and 751 lines give a non-CTA
+// 60.01 Hz frame with H+/V- sync and VIC 0 metadata.
+//
+// The line period is the point. The previous geometry (1440x741, 22.5 us
+// lines) put 16.2 ms of active video in every frame where a CEA 720p source
+// has 16.0 ms, and at least one 4K TV's low-latency (game mode) path, which
+// chases the input with a partial-frame buffer sized for standard timing,
+// then displayed the bottom of the picture one frame late (2026-09-22:
+// reproduced on that geometry, clean on both this one and the CEA raster
+// below; the CEA raster's 372 MHz clock brings its own artifact back on the
+// same TV). Matching the standard line period keeps the active period at
+// 16.0 ms with the pixel clock unchanged.
+//
+// Horizontal blanking is 140 px. The 72 px back porch must hold a data
+// island plus the video preamble and guard band on active lines
+// (8 + 36 + 8 + 2 = 54), which leaves 18 px of control period; the front
+// porch is free space. The blanking lines sum to 749 against v_total 751 so
+// a runtime vtotal of 750 (the ~60.1 Hz genlock nominal) keeps every active
+// line through a one-line acquire step; the two spare lines are extra front
+// porch at the nominal 751.
 const video_mode_t video_mode_720_p = {
-    .h_front_porch = 48,
+    .h_front_porch = 36,
     .h_sync_width = 32,
-    .h_back_porch = 80,
+    .h_back_porch = 72,
     .h_active_pixels = 1280,
-    // Same top-pinned-blanking constraint as video_mode_480_p above: the sum
-    // front+sync+back+active must stay at or below the genlock nominal minus one
-    // acquire step. The CVT-RB 3/5/13 put it at 741, two lines over the SNES 740
-    // nominal (GENLOCK_NOMINAL_VTOTAL_720), so 720p measured as 719p. One line
-    // comes off the front porch (free -- v_total is unchanged, so it moves to the
-    // tail of the counter) and one off the back porch, which lifts the picture by
-    // a line inside the blanking. The front porch may not go below 2: v_scanline
-    // 0 and 1 carry the AVI infoframe and the fine-htrim line, and both must be
-    // ordinary blanking (see video_output_handle_blanking()).
-    .v_front_porch = 2,
+    .v_front_porch = 4,
     .v_sync_width = 5,
-    .v_back_porch = 12,
+    .v_back_porch = 20,
     .v_active_lines = 720,
-    .h_total_pixels = 1440,
-    .v_total_lines = 741,
+    .h_total_pixels = 1420,
+    .v_total_lines = 751,
     .hstx_clk_div = 1,
     .hstx_csr_clkdiv = 5,
     .hsync_positive = true,
