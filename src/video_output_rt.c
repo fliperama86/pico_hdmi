@@ -413,6 +413,39 @@ const video_mode_t video_mode_240_p_snes_genlock = {
 };
 #endif
 
+#if PICO_HDMI_240P_SNES_NATIVE_RASTER
+// 240p at a source's own dot period: 1280 active pixels holding a 256-pixel
+// source repeated 5x, on a 1707-pixel line. Intended for a 268.8 MHz clk_sys
+// (CSR /5 with PICO_HDMI_240P_HSTX_CLK_DIV=2 gives a 26.88 MHz pixel clock):
+// 5 / 26.88 MHz = 186.0 ns per source pixel against the SNES dot's 186.2 ns,
+// and 1280 / 1707 of the line is active against the SNES's 256 / 341. A sink
+// that derives pixel shape from timing (a RetroTINK-4K fed DV1 metadata)
+// then sees the source's real pixel aspect instead of square pixels.
+//
+// 26.88M / (1707 * 262) = 60.103 Hz, 29 px per frame short of the SNES's
+// 60.0988 Hz, so genlock at nominal 262 parks ~1.3 px of standing trim on
+// each blanking line. Horizontal sync and back porch are the stock 240p ones;
+// the extra 107 pixels are front porch. Vertical is the stock 240p raster,
+// whose blanking sum of 261 already satisfies the nominal-1 invariant.
+const video_mode_t video_mode_240_p_snes_native = {
+    .h_front_porch = 139,
+    .h_sync_width = 192,
+    .h_back_porch = 96,
+    .h_active_pixels = 1280,
+    .v_front_porch = 3,
+    .v_sync_width = 4,
+    .v_back_porch = 14,
+    .v_active_lines = 240,
+    .h_total_pixels = 1707,
+    .v_total_lines = 262,
+    .hstx_clk_div = PICO_HDMI_240P_HSTX_CLK_DIV,
+    .hstx_csr_clkdiv = 5,
+    .hsync_positive = false,
+    .vsync_positive = false,
+    .data_island_in_hsync = true,
+};
+#endif
+
 // Exact-clock 1280x720 reduced blanking at the CEA line period. The normal
 // runtime firmware uses a 320 MHz system/HSTX clock, so CSR /5 gives an exact
 // 64 MHz pixel clock; 1420 pixels per line is then 22.19 us, the same line
@@ -1189,6 +1222,22 @@ void video_output_set_spd_infoframe(const char *vendor, const char *product, uin
     spd_copy(spd_product, sizeof(spd_product), product);
     spd_device_info = device_info;
     spd_enabled = true;
+}
+
+// DV1 SPD payload, set by video_output_set_spd_dv1(); takes precedence over
+// the strings above while enabled.
+static video_output_dv1_t spd_dv1;
+static char spd_dv1_name[14 + 1];
+static bool spd_dv1_enabled;
+
+void video_output_set_spd_dv1(const video_output_dv1_t *dv1)
+{
+    spd_dv1_enabled = (dv1 != NULL);
+    if (dv1 != NULL) {
+        spd_dv1 = *dv1;
+        spd_copy(spd_dv1_name, sizeof(spd_dv1_name), dv1->name);
+        spd_dv1.name = spd_dv1_name;
+    }
 }
 
 typedef struct {
@@ -2373,10 +2422,19 @@ static void build_all_command_lists(const video_mode_t *mode)
     }
     hstx_encode_data_island(&island, &packet, false, di_hsync_active);
     vblank_avi_infoframe_len = BUILD_LINE_WITH_DI(vblank_avi_infoframe, island.words, false, false);
-    if (spd_enabled) {
+    if (spd_enabled || spd_dv1_enabled) {
         // Second island, always after the sync pulse whichever side of it the
         // mode puts the AVI island on, so it is encoded with hsync inactive.
-        hstx_packet_set_spd_infoframe(&packet, spd_vendor, spd_product, spd_device_info);
+        if (spd_dv1_enabled) {
+            // DV1 positions count from the end of each sync pulse. The
+            // front-porch-only vtotal trims leave both back porches alone.
+            const uint16_t de_h = (uint16_t)(mode->h_back_porch + spd_dv1.x);
+            const uint16_t de_v = (uint16_t)(mode->v_back_porch + spd_dv1.y + 1U);
+            hstx_packet_set_spd_dv1_infoframe(&packet, spd_dv1.flags, spd_dv1.pixel_repetition, de_h, de_v,
+                                              spd_dv1.width, spd_dv1.height, spd_dv1.name);
+        } else {
+            hstx_packet_set_spd_infoframe(&packet, spd_vendor, spd_product, spd_device_info);
+        }
         hstx_encode_data_island(&island, &packet, false, false);
         vblank_avi_infoframe_len =
             line_append_second_di(vblank_avi_infoframe, vblank_avi_infoframe_len, island.words, false);

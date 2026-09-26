@@ -326,6 +326,36 @@ void hstx_packet_set_spd_infoframe(hstx_packet_t *packet, const char *vendor, co
     compute_all_parity(packet);
 }
 
+static void spd_put_u16(hstx_packet_t *packet, int pb, uint16_t v)
+{
+    packet->subpacket[pb / 7][pb % 7] = (uint8_t)v;
+    packet->subpacket[(pb + 1) / 7][(pb + 1) % 7] = (uint8_t)(v >> 8);
+}
+
+// Byte layout from MiSTer Main's spd_config_update() (video.cpp), the
+// reference the RetroTINK-4K was built against. The name runs to PB27, the
+// last byte of the packet body.
+void hstx_packet_set_spd_dv1_infoframe(hstx_packet_t *packet, uint8_t flags, uint8_t pixel_repetition, uint16_t de_h,
+                                       uint16_t de_v, uint16_t width, uint16_t height, const char *name)
+{
+    hstx_packet_init(packet);
+    packet->header[0] = 0x83;
+    packet->header[1] = 0x01;
+    packet->header[2] = 0x19;
+
+    spd_put_string(packet, 1, "DV1", 3);
+    packet->subpacket[4 / 7][4 % 7] = flags;
+    packet->subpacket[5 / 7][5 % 7] = pixel_repetition;
+    spd_put_u16(packet, 6, de_h);
+    spd_put_u16(packet, 8, de_v);
+    spd_put_u16(packet, 10, width);
+    spd_put_u16(packet, 12, height);
+    spd_put_string(packet, 14, name, 14);
+
+    compute_infoframe_checksum(packet);
+    compute_all_parity(packet);
+}
+
 // IEC 60958-3 consumer channel status, one bit per audio frame across the
 // 192-frame block. Byte 0 declares consumer L-PCM/copy permitted; byte 3
 // carries the sample-frequency code. Remaining bytes are zero.

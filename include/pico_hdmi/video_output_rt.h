@@ -47,6 +47,11 @@ extern const video_mode_t video_mode_240_p_genlock;
 // matters to a VIC-0 auto-measuring sink.
 extern const video_mode_t video_mode_240_p_snes_genlock;
 #endif
+#if PICO_HDMI_240P_SNES_NATIVE_RASTER
+// 240p at the SNES dot period (1707x262, 5x-repeated 256-pixel source, for a
+// 268.8 MHz clk_sys); see its definition in video_output_rt.c.
+extern const video_mode_t video_mode_240_p_snes_native;
+#endif
 extern const video_mode_t video_mode_720_p;
 // Dormant CEA VIC 4 720p timing (classic 1280x720, 74.25 MHz nominal); see
 // video_output_rt.c. Not currently selected anywhere; kept for a possible
@@ -212,5 +217,23 @@ void video_output_set_scanline_level(uint8_t level);
 // by video_output_set_mode()), and the strings are copied at call time.
 // Not sent at all until this is called, so existing consumers are unchanged.
 void video_output_set_spd_infoframe(const char *vendor, const char *product, uint8_t device_info);
+
+// Send DV1 metadata in the SPD InfoFrame instead of the strings above (see
+// hstx_packet_set_spd_dv1_infoframe()). Describe the picture inside the
+// active area: x in output pixels and y in lines from the first active pixel
+// and line, width and height in source pixels and lines. The library adds the
+// mode's back porches. DV1 has no vertical repetition field, so only use it
+// on a mode that sends every source line once. Same timing rule as
+// video_output_set_spd_infoframe(); NULL goes back to the plain SPD.
+typedef struct {
+    uint16_t x;
+    uint16_t y;
+    uint16_t width;
+    uint16_t height;
+    uint8_t pixel_repetition;
+    uint8_t flags;    // HSTX_DV1_FLAG_*
+    const char *name; // up to 14 characters, copied
+} video_output_dv1_t;
+void video_output_set_spd_dv1(const video_output_dv1_t *dv1);
 
 #endif // VIDEO_OUTPUT_RT_H
