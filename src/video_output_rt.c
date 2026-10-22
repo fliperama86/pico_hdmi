@@ -604,16 +604,21 @@ volatile uint32_t video_frame_count = 0;
 // DVI mode: when true, disables all HDMI Data Islands (pure DVI output, no audio)
 static bool dvi_mode = false;
 
-// Max active pixels across all modes (1280 for 240p/720p).
+// Capacity can be increased by a consumer supplying a wider custom mode.
+#ifndef PICO_HDMI_MAX_H_ACTIVE_PIXELS
+#define PICO_HDMI_MAX_H_ACTIVE_PIXELS 1280
+#endif
+
+// Max active pixels across all modes (1280 by default).
 // FEASIBILITY SPIKE (PICO_HDMI_PIXEL_FORMAT_RGB888, default OFF): one 32-bit
 // RGB888 word per pixel instead of two packed 16-bit RGB565 pixels per word,
 // so the buffer element type/width doubles in bytes (1280 x uint32_t vs
 // 1280 x uint16_t). Element count stays 1280 either way -- it is a pixel
 // count in the RGB888 case and a halfword (2px) count in the RGB565 case.
 #if PICO_HDMI_PIXEL_FORMAT_RGB888
-static uint32_t PICO_HDMI_LINE_BUFFER_ATTR line_buffer[1280] __attribute__((aligned(4)));
+static uint32_t PICO_HDMI_LINE_BUFFER_ATTR line_buffer[PICO_HDMI_MAX_H_ACTIVE_PIXELS] __attribute__((aligned(4)));
 #else
-static uint16_t PICO_HDMI_LINE_BUFFER_ATTR line_buffer[1280] __attribute__((aligned(4)));
+static uint16_t PICO_HDMI_LINE_BUFFER_ATTR line_buffer[PICO_HDMI_MAX_H_ACTIVE_PIXELS] __attribute__((aligned(4)));
 #endif
 
 #if PICO_HDMI_ACTIVE_LINE_DOUBLE_BUFFER
@@ -2345,6 +2350,9 @@ static void configure_audio_packets(uint32_t sample_rate)
 
 static void init_rt_from_mode(const video_mode_t *mode)
 {
+#if PICO_HDMI_MAX_H_ACTIVE_PIXELS > 1280
+    hard_assert(mode->h_active_pixels <= PICO_HDMI_MAX_H_ACTIVE_PIXELS);
+#endif
 #if PICO_HDMI_RT_RUNTIME_MODE_ATTRS
     hstx_packet_set_sync_polarity(mode->hsync_positive, mode->vsync_positive);
     rt_di_in_hsync = mode->data_island_in_hsync;
@@ -2385,7 +2393,8 @@ static void build_all_command_lists(const video_mode_t *mode)
     // exact-clock CVT-RB, so it uses VIC 0 with explicit 16:9 metadata.
     hstx_packet_t packet;
     hstx_data_island_t island;
-    const bool mode_is_240p = mode->v_active_lines == 240 && mode->h_active_pixels == 1280;
+    const bool mode_is_240p = mode->v_active_lines == 240 &&
+                              (mode->h_active_pixels == 1280 || mode->h_active_pixels == PICO_HDMI_MAX_H_ACTIVE_PIXELS);
     const bool mode_is_720p_rb = mode->v_active_lines == 720 && mode->h_active_pixels == 1280;
 #if PICO_HDMI_VBLANK_HTRIM
     // Retired on hardware evidence: elastic single-line trim did not fix the
