@@ -39,6 +39,15 @@ void hstx_di_queue_set_sample_rate(uint32_t sample_rate);
  * Returns true if successful, false if the queue is full.
  */
 bool hstx_di_queue_push_8ch(const hstx_data_island2_t *island);
+
+/**
+ * Zero-copy push: return the next free slot to encode an island into, or
+ * NULL if the queue is full. The slot goes out only after
+ * hstx_di_queue_commit_8ch(). Single producer: do not mix with push calls
+ * between a reserve and its commit.
+ */
+hstx_data_island2_t *hstx_di_queue_reserve_8ch(void);
+void hstx_di_queue_commit_8ch(void);
 #else
 /**
  * Push a pre-encoded Data Island into the queue.
@@ -51,6 +60,23 @@ bool hstx_di_queue_push(const hstx_data_island_t *island);
  * Get the current number of items in the queue.
  */
 uint32_t hstx_di_queue_get_level(void);
+
+/**
+ * Get the number of items that can be pushed before the queue is full.
+ */
+uint32_t hstx_di_queue_get_free(void);
+
+/**
+ * Audio sample rate the queue is pacing for (set by hstx_di_queue_set_sample_rate).
+ */
+uint32_t hstx_di_queue_get_sample_rate(void);
+
+/**
+ * Audio islands the scheduler has sent, queued or silence. Advances at the
+ * HDMI audio rate (HSTX_DI_AUDIO_SAMPLES_PER_ISLAND samples per island) for
+ * as long as video runs; wraps at 2^32.
+ */
+extern volatile uint32_t hstx_di_queue_islands_sent;
 
 /**
  * Times the queue ran dry at a scheduled audio slot and a silence packet

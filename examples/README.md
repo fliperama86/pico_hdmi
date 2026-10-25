@@ -135,9 +135,9 @@ Proof of concept for 8-channel HDMI audio (`PICO_HDMI_AUDIO_8CH`):
   level, underrun count (it should stay at 0), Core 0 audio load, and the
   playing channel.
 
-Generating the audio takes about 15 us per two-frame island at 252 MHz,
-24,000 islands per second: about 36-40% of Core 0. (At the stock 126 MHz it
-was about 30 us per island, 75-80% of Core 0.)
+The demo feeds audio through the library's PCM interface
+(`hdmi_audio_8ch_write()`). Generating and encoding it takes about 8.6 us per
+two-frame island at 252 MHz, 24,000 islands per second: about 21% of Core 0.
 
 The screen's "Measured rate" line times frames against the crystal over a
 10 s window and shows the deviation from nominal in ppm, so a pull on the

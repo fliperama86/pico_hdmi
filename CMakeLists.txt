@@ -43,6 +43,7 @@ endif()
 
 add_library(pico_hdmi
     ${PICO_HDMI_VIDEO_OUTPUT_SRC}
+    src/hdmi_audio_8ch.c
     src/hstx_data_island_queue.c
     src/hstx_packet.c
     src/hstx_pins.c

@@ -6,6 +6,8 @@
 
 #include "pico.h"
 
+#include "hardware/sync.h"
+
 #ifndef PICO_HDMI_RAM_DI_QUEUE_PUSH
 #define PICO_HDMI_RAM_DI_QUEUE_PUSH 0
 #endif
@@ -29,6 +31,8 @@ static bool di_hsync_active = DI_HSYNC_ACTIVE;
 static uint32_t current_sample_rate = 48000;
 // Underrun insertions of the silence packet (see get_audio_packet).
 volatile uint32_t hstx_di_queue_silence_count;
+// Every audio island handed to the scanline ISR, queued or silence.
+volatile uint32_t hstx_di_queue_islands_sent;
 
 // Audio timing state (default 48kHz, 525 lines for 480p)
 static uint32_t audio_sample_accum = 0; // Fixed-point accumulator
@@ -80,6 +84,7 @@ void hstx_di_queue_init(void)
     di_ring_head = 0;
     di_ring_tail = 0;
     hstx_di_queue_silence_count = 0;
+    hstx_di_queue_islands_sent = 0;
     audio_sample_accum = 0;
 #if PICO_HDMI_EXACT_AUDIO_PACING
     audio_pacing_rem_accum = 0;
@@ -114,7 +119,7 @@ void hstx_di_queue_set_hsync_active(bool hsync_active)
     hstx_di_queue_build_silence_packet();
 }
 
-bool hstx_di_queue_get_hsync_active(void)
+bool __not_in_flash_func(hstx_di_queue_get_hsync_active)(void)
 {
     return di_hsync_active;
 }
@@ -157,6 +162,34 @@ bool hstx_di_queue_push(const hstx_data_island_t *island)
     return true;
 }
 
+#if PICO_HDMI_AUDIO_8CH
+hstx_data_island2_t *__not_in_flash_func(hstx_di_queue_reserve_8ch)(void)
+{
+    uint32_t next_head = (di_ring_head + 1) % DI_RING_BUFFER_SIZE;
+    if (next_head == di_ring_tail)
+        return NULL;
+    return &di_ring_buffer[di_ring_head];
+}
+
+void __not_in_flash_func(hstx_di_queue_commit_8ch)(void)
+{
+    // The island's words must be visible to the other core before the
+    // scanline ISR can see the new head.
+    __dmb();
+    di_ring_head = (di_ring_head + 1) % DI_RING_BUFFER_SIZE;
+}
+#endif
+
+uint32_t hstx_di_queue_get_free(void)
+{
+    return (DI_RING_BUFFER_SIZE - 1) - hstx_di_queue_get_level();
+}
+
+uint32_t __not_in_flash_func(hstx_di_queue_get_sample_rate)(void)
+{
+    return current_sample_rate;
+}
+
 uint32_t hstx_di_queue_get_level(void)
 {
     uint32_t head = di_ring_head;
@@ -187,6 +220,7 @@ const uint32_t *__scratch_x("") hstx_di_queue_get_audio_packet(void)
     // two-frame islands.
     if (audio_sample_accum >= DI_SAMPLES_FP) {
         audio_sample_accum -= DI_SAMPLES_FP;
+        hstx_di_queue_islands_sent++;
         if (di_ring_tail != di_ring_head) {
             const uint32_t *words = di_ring_buffer[di_ring_tail].words;
             di_ring_tail = (di_ring_tail + 1) % DI_RING_BUFFER_SIZE;

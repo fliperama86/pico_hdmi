@@ -23,6 +23,7 @@
  * Target: RP2350 (Raspberry Pi Pico 2)
  */
 
+#include "pico_hdmi/hdmi_audio_8ch.h"
 #include "pico_hdmi/hstx_data_island_queue.h"
 #include "pico_hdmi/hstx_packet.h"
 #include "pico_hdmi/video_output.h"
@@ -90,7 +91,9 @@
 #define TONE_AMPLITUDE (1 << 21)                    // -12 dBFS of 24-bit full scale
 
 // Keep this many islands queued (the ring holds 255): ~10 ms of audio.
-#define QUEUE_TARGET_LEVEL 240
+#define QUEUE_TARGET_FRAMES 480
+// Frames generated per hdmi_audio_8ch_write() call.
+#define GEN_BLOCK_FRAMES 32
 
 // How often Core 0 refreshes the status screen.
 #define SCREEN_UPDATE_US 100000
@@ -113,7 +116,6 @@ static int32_t sine_table[SINE_TABLE_SIZE];
 static uint32_t audio_phase = 0;
 static uint32_t step_position = 0; // Sample index within the current channel's step
 static int tone_channel = 0;       // Channel the generator is producing
-static int audio_frame_counter = 0;
 static uint64_t samples_generated = 0;            // 8-channel frames generated so far
 static uint32_t times_played[NUM_CHANNELS] = {0}; // Tones started per channel
 
@@ -169,41 +171,42 @@ static void next_frame(audio_sample_8ch_t *frame)
     }
 }
 
-// Top the Data Island queue up. Each island carries two 8-channel frames.
-// Returns the number of islands pushed.
-static int generate_audio(void)
+// Keep QUEUE_TARGET_FRAMES frames queued ahead of the HDMI output, generated
+// in blocks and handed over through the library's PCM interface. Returns the
+// number of frames written.
+static uint32_t generate_audio(void)
 {
-    int pushed_now = 0;
-#if AUDIO_8CH_TEST_TRACE
-    // Bounded so the trace heartbeat keeps running even if the queue never fills.
-    for (int n = 0; n < 16 && hstx_di_queue_get_level() < QUEUE_TARGET_LEVEL; n++) {
-#else
-    while (hstx_di_queue_get_level() < QUEUE_TARGET_LEVEL) {
-#endif
-        audio_sample_8ch_t frame;
-        hstx_packet_t first;
-        hstx_packet_t second;
-
-        next_frame(&frame);
-        audio_frame_counter = hstx_packet_set_audio_sample_8ch(&first, &frame, audio_frame_counter, AUDIO_SAMPLE_RATE);
-        next_frame(&frame);
-        audio_frame_counter =
-            hstx_packet_set_audio_sample_8ch(&second, &frame, audio_frame_counter, AUDIO_SAMPLE_RATE);
-
-        hstx_data_island2_t island;
-        hstx_encode_data_island2(&island, &first, &second, false, DI_HSYNC_ACTIVE);
-        hstx_di_queue_push_8ch(&island);
-        pushed_now++;
-#if AUDIO_8CH_TEST_TRACE
-        static uint32_t pushed;
-        if (++pushed == 241) {
-            TRACE("pushed %lu, queue %lu\n", (unsigned long)pushed, (unsigned long)hstx_di_queue_get_level());
+    uint32_t written = 0;
+    for (;;) {
+        const uint32_t queued = hdmi_audio_8ch_queued_frames();
+        if (queued >= QUEUE_TARGET_FRAMES) {
+            break;
         }
-#endif
-
+        // Never generate more than the queue can take, so no frame is lost.
+        uint32_t n = QUEUE_TARGET_FRAMES - queued;
+        const uint32_t room = hdmi_audio_8ch_free_frames();
+        if (n > room) {
+            n = room;
+        }
+        if (n > GEN_BLOCK_FRAMES) {
+            n = GEN_BLOCK_FRAMES;
+        }
+        if (n == 0) {
+            break;
+        }
+        audio_sample_8ch_t block[GEN_BLOCK_FRAMES];
+        for (uint32_t i = 0; i < n; i++) {
+            next_frame(&block[i]);
+        }
+        written += hdmi_audio_8ch_write(block, n);
         display_channel = (step_position < TONE_SAMPLES) ? tone_channel : -1;
+#if AUDIO_8CH_TEST_TRACE
+        // One block per call so the trace heartbeat keeps running even if
+        // the queue never fills.
+        break;
+#endif
     }
-    return pushed_now;
+    return written;
 }
 
 // ============================================================================
@@ -359,12 +362,12 @@ static void update_screen(const screen_stats_t *st)
     bar[PROGRESS_WIDTH] = '\0';
     text_screen_printf(19, TEXT_PAL_NORMAL, "  [%s]", bar);
 
-    const uint32_t queue = hstx_di_queue_get_level();
+    const uint32_t queue = hdmi_audio_8ch_queued_frames() / 2;
     text_screen_printf(22, TEXT_PAL_NORMAL, "  Samples sent   %-14llu  IEC 60958 frame   %3d / 192",
-                       (unsigned long long)samples_generated, audio_frame_counter);
+                       (unsigned long long)samples_generated, (int)(samples_generated % 192));
     text_screen_printf(23, TEXT_PAL_NORMAL, "  Audio queue    %3lu / 255 islands (%lu.%lu ms)   Underruns         %lu",
                        (unsigned long)queue, (unsigned long)(queue * 2 * 10 / 480),
-                       (unsigned long)(queue * 2 * 100 / 480 % 10), (unsigned long)hstx_di_queue_silence_count);
+                       (unsigned long)(queue * 2 * 100 / 480 % 10), (unsigned long)hdmi_audio_8ch_underruns());
     text_screen_printf(24, TEXT_PAL_NORMAL, "  Video frames   %-14lu  Frame rate        %lu fps",
                        (unsigned long)st->frames, (unsigned long)st->fps);
     // Core 1 renders 480 text lines 60 times a second.
@@ -388,6 +391,32 @@ static void update_screen(const screen_stats_t *st)
         text_screen_printf(27, TEXT_PAL_HEADING, "  %s", st->hook_status);
     }
 }
+
+#if AUDIO_8CH_TEST_TRACE
+// Split the per-island audio cost into its stages (trace builds only).
+static void benchmark_audio_path(void)
+{
+    enum { N = 1000 };
+    audio_sample_8ch_t frame = {{1, -2, 3, -4, 5, -6, 7, -8}};
+    hstx_packet_t a, b;
+    static hstx_data_island2_t island;
+    int fc = 0;
+    uint64_t t0 = time_us_64();
+    for (int i = 0; i < N; i++) {
+        frame.ch[0] = i;
+        fc = hstx_packet_set_audio_sample_8ch(&a, &frame, fc, AUDIO_SAMPLE_RATE);
+        fc = hstx_packet_set_audio_sample_8ch(&b, &frame, fc, AUDIO_SAMPLE_RATE);
+    }
+    uint64_t t1 = time_us_64();
+    for (int i = 0; i < N; i++) {
+        a.subpacket[0][0] = (uint8_t)i;
+        hstx_encode_data_island2(&island, &a, &b, false, DI_HSYNC_ACTIVE);
+    }
+    uint64_t t2 = time_us_64();
+    TRACE("per island: build 2 packets %lu ns, encode %lu ns\n", (unsigned long)((t1 - t0) * 1000 / N),
+          (unsigned long)((t2 - t1) * 1000 / N));
+}
+#endif
 
 // Time the scanline renderer over a full frame. Runs on Core 0 before Core 1
 // starts, as an estimate of what the video interrupt spends per line.
@@ -433,6 +462,9 @@ int main(void)
     update_screen(&stats);
     stats.render_ns_per_line = measure_render_ns_per_line();
     TRACE("sine table and screen done, render %lu ns/line\n", (unsigned long)stats.render_ns_per_line);
+#if AUDIO_8CH_TEST_TRACE
+    benchmark_audio_path();
+#endif
 
     // Initialize HDMI output
     hstx_di_queue_init();
@@ -449,10 +481,10 @@ int main(void)
 #else
     // Pre-fill audio buffer
     uint64_t prefill_start = time_us_64();
-    while (hstx_di_queue_get_level() < QUEUE_TARGET_LEVEL) {
+    while (hdmi_audio_8ch_queued_frames() < QUEUE_TARGET_FRAMES) {
         generate_audio();
     }
-    TRACE("prefill done, queue %lu, %lu us\n", (unsigned long)hstx_di_queue_get_level(),
+    TRACE("prefill done, %lu frames queued, %lu us\n", (unsigned long)hdmi_audio_8ch_queued_frames(),
           (unsigned long)(time_us_64() - prefill_start));
 #endif
 
@@ -496,7 +528,7 @@ int main(void)
             last_trace = now;
             traces++;
             TRACE("loop %lu frames %lu queue %lu underruns %lu\n", (unsigned long)loops, (unsigned long)frames,
-                  (unsigned long)hstx_di_queue_get_level(), (unsigned long)hstx_di_queue_silence_count);
+                  (unsigned long)hdmi_audio_8ch_queued_frames(), (unsigned long)hdmi_audio_8ch_underruns());
             if (traces == 25) {
                 text_screen_dump();
             }
@@ -515,7 +547,7 @@ int main(void)
             const bool rate_ok = measure_frame_rate(&stats);
             int ch = display_channel;
             printf("frames %lu | queue %lu | underruns %lu | core0 audio load %lu%% | %s%s", (unsigned long)frames,
-                   (unsigned long)hstx_di_queue_get_level(), (unsigned long)hstx_di_queue_silence_count,
+                   (unsigned long)hdmi_audio_8ch_queued_frames(), (unsigned long)hdmi_audio_8ch_underruns(),
                    (unsigned long)load_pct, ch >= 0 ? "playing " : "gap", ch >= 0 ? channel_names[ch] : "");
             if (rate_ok) {
                 const int32_t mag = stats.frame_ppm_x10 < 0 ? -stats.frame_ppm_x10 : stats.frame_ppm_x10;
