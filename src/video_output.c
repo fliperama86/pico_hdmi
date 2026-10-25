@@ -272,27 +272,56 @@ static void dump_static_command_lists(void)
 // HSTX Resync - Reset output to sync with input VSYNC
 // ============================================================================
 
+// NOP command words that flush any part-done HSTX command: the longest
+// command takes 4095 data words, and a NOP is harmless as either.
+#define HSTX_FLUSH_WORDS 4096
+
 static void __scratch_x("") hstx_resync(void)
 {
-    // 1. Abort DMA chains
-    dma_channel_abort(DMACH_PING);
-    dma_channel_abort(DMACH_PONG);
+    const uint32_t dma_mask = (1U << DMACH_PING) | (1U << DMACH_PONG);
 
-    // 2. Disable HSTX (resets shift register, clock generator, and flushes FIFO)
+    // 1. Stop both DMA channels. RP2350-E5: an abort can re-trigger the
+    //    channel a chain points at unless EN is cleared on the aborted channel
+    //    and on its chain target first; the two channels chain to each other.
+    //    EN comes back with the saved control words before the restart.
+    const uint32_t ctrl_ping = dma_hw->ch[DMACH_PING].al1_ctrl;
+    const uint32_t ctrl_pong = dma_hw->ch[DMACH_PONG].al1_ctrl;
+    hw_clear_bits(&dma_hw->ch[DMACH_PING].al1_ctrl, DMA_CH0_CTRL_TRIG_EN_BITS);
+    hw_clear_bits(&dma_hw->ch[DMACH_PONG].al1_ctrl, DMA_CH0_CTRL_TRIG_EN_BITS);
+    dma_hw->abort = dma_mask;
+    while ((dma_hw->ch[DMACH_PING].ctrl_trig | dma_hw->ch[DMACH_PONG].ctrl_trig) & DMA_CH0_CTRL_TRIG_BUSY_BITS)
+        tight_loop_contents();
+
+    // 2. Drain the HSTX. Disabling it does not flush the FIFO (with EN low the
+    //    FIFO is simply not popped), and the command expander may be part way
+    //    through a command whose remaining data words would swallow the start
+    //    of the restarted stream, misaligning it again. With EN still high,
+    //    feed NOPs until any such command has completed and the FIFO is empty.
+    for (int i = 0; i < HSTX_FLUSH_WORDS; i++) {
+        while (hstx_fifo_hw->stat & HSTX_FIFO_STAT_FULL_BITS)
+            tight_loop_contents();
+        hstx_fifo_hw->fifo = HSTX_CMD_NOP;
+    }
+    while (!(hstx_fifo_hw->stat & HSTX_FIFO_STAT_EMPTY_BITS))
+        tight_loop_contents();
+
+    // 3. Disable HSTX: resets the shift counter and clock generator.
     hstx_ctrl_hw->csr &= ~HSTX_CTRL_CSR_EN_BITS;
-
-    // Small delay to ensure HSTX fully stops
     __asm volatile("nop\nnop\nnop\nnop");
 
-    // 3. Reset state to start of frame
+    // Restore the channels' control words (EN included) without triggering.
+    dma_hw->ch[DMACH_PING].al1_ctrl = ctrl_ping;
+    dma_hw->ch[DMACH_PONG].al1_ctrl = ctrl_pong;
+
+    // 4. Reset state to start of frame
     v_scanline = 0;
     vactive_cmdlist_posted = false;
     dma_pong = false;
 
-    // 4. Clear any pending DMA interrupts
+    // 5. Clear any pending DMA interrupts (the abort may have raised one)
     dma_hw->ints0 = (1U << DMACH_PING) | (1U << DMACH_PONG);
 
-    // 5. Configure DMA PING to start from beginning of frame (Line 0)
+    // 6. Configure DMA PING to start from beginning of frame (Line 0)
     dma_channel_hw_t *ch_ping = &dma_hw->ch[DMACH_PING];
 #if PICO_HDMI_PRECOMPOSED_ACTIVE_LINES
     if (native_pixel_mode) {
@@ -304,13 +333,13 @@ static void __scratch_x("") hstx_resync(void)
     ch_ping->read_addr = (uintptr_t)vblank_line_vsync_off;
     ch_ping->transfer_count = count_of(vblank_line_vsync_off);
 
-    // 6. Configure DMA PONG for the NEXT line (Line 1)
+    // 7. Configure DMA PONG for the NEXT line (Line 1)
     // This ensures that when PING finishes and chains to PONG, PONG is ready.
     dma_channel_hw_t *ch_pong = &dma_hw->ch[DMACH_PONG];
     ch_pong->read_addr = (uintptr_t)vblank_line_vsync_off; // Line 1 is also blank
     ch_pong->transfer_count = count_of(vblank_line_vsync_off);
 
-    // 7. Re-enable HSTX then start DMA
+    // 8. Re-enable HSTX then start DMA
     hstx_ctrl_hw->csr |= HSTX_CTRL_CSR_EN_BITS;
     dma_channel_start(DMACH_PING);
 }
