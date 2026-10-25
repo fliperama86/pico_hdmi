@@ -116,22 +116,34 @@ Same HSTX pinout as bouncing_box above.
 
 Proof of concept for 8-channel HDMI audio (`PICO_HDMI_AUDIO_8CH`):
 
-- 640x480 @ 60Hz at the stock 126 MHz clock
+- 640x480 @ 60Hz (standard 25.2 MHz pixel clock)
+- 252 MHz system clock at 1.15 V, with the library built with
+  `PICO_HDMI_HSTX_CLK_DIV=2` so HSTX still gets 126 MHz (the CMakeLists
+  sets this)
 - 8-channel 48 kHz 24-bit L-PCM, 7.1 channel allocation (CA 0x13)
 - Plays 1 s of tone, then 0.5 s of silence, on channels 1 to 8 in turn:
   FL, FR, LFE, FC, RL, RR, RLC, RRC. The tone is 440 Hz, except on LFE,
   which gets 60 Hz because receivers low-pass that channel.
-- The screen shows eight columns; the playing channel's column is green.
-  The nine possible lines are drawn once at startup and handed to the video
-  interrupt by pointer, so the display costs almost nothing.
+- An 80x30 text status screen: the stream and video format, a table of the
+  eight slots with the playing one highlighted, the current tone with a
+  countdown and progress bar, and live statistics (samples sent, IEC 60958
+  frame, queue level, underruns, frame rate, CPU load). The video interrupt
+  renders each scanline from the text buffer (8x8 public-domain font at
+  double height), which takes about 7.5 us per line: about 22% of Core 1.
 - The LED blinks once per second while video frames are being produced.
 - USB serial prints a status line every second: video frame count, queue
   level, underrun count (it should stay at 0), Core 0 audio load, and the
   playing channel.
 
-Generating the audio takes about 75-80% of Core 0 at the stock 126 MHz
-(about 30 us per two-frame island, 24,000 islands per second). It keeps up
-with no underruns, but leaves Core 0 little room for other work.
+Generating the audio takes about 15 us per two-frame island at 252 MHz,
+24,000 islands per second: about 36-40% of Core 0. (At the stock 126 MHz it
+was about 30 us per island, 75-80% of Core 0.)
+
+The screen's "Measured rate" line times frames against the crystal over a
+10 s window and shows the deviation from nominal in ppm, so a pull on the
+system PLL (for example by a clock servo) is visible. The demo also has a weak
+`audio_8ch_test_hook()` that a test build can override to run extra code each
+loop and show one line of status.
 
 Diagnostic build options: `-DAUDIO_8CH_TEST_VIDEO_ONLY=ON` sends plain DVI
 video with no audio; `-DAUDIO_8CH_TEST_TRACE=ON` prints startup markers and a

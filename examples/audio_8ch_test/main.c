@@ -3,10 +3,16 @@
  *
  * Plays a test tone on each of the eight HDMI audio channels in turn:
  * 1.0 s of tone, 0.5 s of silence, then the next channel, forever.
- * - 640x480 @ 60Hz HDMI output
+ * - 640x480 @ 60Hz HDMI output (25.2 MHz pixel clock)
+ * - 252 MHz system clock at 1.15 V, HSTX clock divided by 2: twice the CPU
+ *   headroom of the stock 126 MHz setup with the same standard video timing
+ * - The frame rate is measured against the crystal over 10 s and shown in
+ *   ppm, so any pull on the system PLL is visible
  * - 8-channel 48 kHz 24-bit L-PCM (PICO_HDMI_AUDIO_8CH), 7.1 allocation
- * - The screen is split into eight columns; the playing channel's column
- *   is lit (prebuilt lines handed to the video interrupt by pointer)
+ * - An 80x30 text status screen: stream and video format, a table of the
+ *   eight slots with the playing one highlighted, the current tone and its
+ *   progress, and live statistics (samples sent, queue, underruns, frame
+ *   rate, CPU load). Rendered line by line in the video interrupt.
  * - The LED blinks once per second while video frames are being produced
  *   (driven by the frame counter the video interrupt advances)
  * - USB serial prints a status line every second: channel, video frame
@@ -26,12 +32,24 @@
 #include "pico/stdlib.h"
 
 #include "hardware/clocks.h"
+#include "hardware/structs/qmi.h"
+#include "hardware/structs/timer.h"
+#include "hardware/vreg.h"
 
 #include <math.h>
 #include <stdio.h>
 
+#include "text_screen.h"
+
 #if !PICO_HDMI_AUDIO_8CH
 #error "audio_8ch_test needs the library built with PICO_HDMI_AUDIO_8CH=ON"
+#endif
+
+// 252 MHz / HSTX div 2 / CSR div 5 = 25.2 MHz pixel clock. The CMakeLists sets
+// PICO_HDMI_HSTX_CLK_DIV=2 for the library to match.
+#define SYS_CLOCK_KHZ 252000
+#if MODE_HSTX_CLK_DIV != 2
+#error "audio_8ch_test runs at 252 MHz and needs the library built with PICO_HDMI_HSTX_CLK_DIV=2"
 #endif
 
 #ifndef AUDIO_8CH_TEST_VIDEO_ONLY
@@ -74,14 +92,14 @@
 // Keep this many islands queued (the ring holds 255): ~10 ms of audio.
 #define QUEUE_TARGET_LEVEL 240
 
-// RGB565 column colours
-#define COLOR_IDLE 0x2104   // Dark grey
-#define COLOR_ACTIVE 0x07E0 // Green
-#define COLOR_GAP 0x0000    // Black divider between columns
+// How often Core 0 refreshes the status screen.
+#define SCREEN_UPDATE_US 100000
 
+// CTA-861 speaker codes and names for channel allocation 0x13 (7.1).
+static const char *const channel_codes[NUM_CHANNELS] = {"FL", "FR", "LFE", "FC", "RL", "RR", "RLC", "RRC"};
 static const char *const channel_names[NUM_CHANNELS] = {
-    "FL (front left)", "FR (front right)", "LFE (subwoofer)",     "FC (front centre)",
-    "RL (rear left)",  "RR (rear right)",  "RLC (rear left ctr)", "RRC (rear right ctr)",
+    "Front left", "Front right", "Low frequency (sub)", "Front centre",
+    "Rear left",  "Rear right",  "Rear left centre",    "Rear right centre",
 };
 
 // ============================================================================
@@ -96,10 +114,11 @@ static uint32_t audio_phase = 0;
 static uint32_t step_position = 0; // Sample index within the current channel's step
 static int tone_channel = 0;       // Channel the generator is producing
 static int audio_frame_counter = 0;
+static uint64_t samples_generated = 0;            // 8-channel frames generated so far
+static uint32_t times_played[NUM_CHANNELS] = {0}; // Tones started per channel
 
-// Channel whose tone is playing, or -1 during the gap. Written by Core 0, read
-// by the scanline callback on Core 1. The generator runs ~10 ms ahead of the
-// HDMI output, which is too little to see.
+// Channel whose tone is playing, or -1 during the gap, for the serial status
+// line. The generator runs ~10 ms ahead of the HDMI output.
 static volatile int display_channel = 0;
 
 static void init_sine_table(void)
@@ -123,6 +142,11 @@ static void next_frame(audio_sample_8ch_t *frame)
     for (int c = 0; c < NUM_CHANNELS; c++) {
         frame->ch[c] = 0;
     }
+
+    if (step_position == 0) {
+        times_played[tone_channel]++;
+    }
+    samples_generated++;
 
     if (step_position < TONE_SAMPLES) {
         int32_t s = sine_table[audio_phase >> (32 - SINE_TABLE_BITS)];
@@ -183,43 +207,197 @@ static int generate_audio(void)
 }
 
 // ============================================================================
-// Scanline Pointer Callback (runs on Core 1)
+// Status Screen (written by Core 0, rendered by the video interrupt)
 // ============================================================================
 
-#define COLUMN_WORDS (FRAME_WIDTH / NUM_CHANNELS / 2) // 40 words = 80 pixels
-#define LINE_WORDS (FRAME_WIDTH / 2)
+// Live figures the main loop measures for the screen.
+typedef struct {
+    uint32_t frames;
+    uint32_t fps;
+    uint32_t core0_load_pct;
+    uint32_t render_ns_per_line; // measured once at startup
+    bool rate_valid;
+    int32_t frame_rate_mhz;  // measured frame rate, millihertz
+    int32_t frame_ppm_x10;   // measured vs nominal frame rate, 0.1 ppm units
+    const char *hook_status; // from audio_8ch_test_hook, or NULL
+} screen_stats_t;
 
-// Every active line is identical, and there are only nine screens: no channel
-// lit (the gap), or one of eight. All nine lines are drawn once at startup and
-// the video interrupt just picks one. Filling a line inside the interrupt
-// costs ~1300 cycles, which together with the 8-channel Data Island copy
-// overran the interrupt's deadline at 126 MHz and broke the HSTX stream.
-static uint32_t channel_lines[NUM_CHANNELS + 1][LINE_WORDS];
+// ============================================================================
+// Optional test hook
+// ============================================================================
 
-static void init_channel_lines(void)
+// Called on every main-loop pass. A test build can link a strong definition
+// (for example the soft VCXO pull test in clock_tests/) and return one line of
+// status for the screen and the serial log, or NULL for none.
+__attribute__((weak)) const char *audio_8ch_test_hook(uint64_t now_us)
 {
-    const uint32_t idle = COLOR_IDLE | (COLOR_IDLE << 16);
-    const uint32_t lit = COLOR_ACTIVE | (COLOR_ACTIVE << 16);
-    const uint32_t gap = COLOR_GAP | (COLOR_GAP << 16);
+    (void)now_us;
+    return NULL;
+}
 
-    // channel_lines[0] has no column lit; channel_lines[n + 1] lights channel n.
-    for (int active = -1; active < NUM_CHANNELS; active++) {
-        uint32_t *dst = channel_lines[active + 1];
-        for (int c = 0; c < NUM_CHANNELS; c++) {
-            const uint32_t color = (c == active) ? lit : idle;
-            for (int i = 0; i < COLUMN_WORDS - 1; i++) {
-                *dst++ = color;
-            }
-            *dst++ = gap; // 2-pixel divider
-        }
+// ============================================================================
+// Frame-rate measurement
+// ============================================================================
+
+// The vsync callback stamps each frame with the crystal-driven microsecond
+// timer. Comparing the frame count against those stamps over 10 s measures
+// the real pixel clock to about 0.1 ppm, including any pull on the PLL.
+static volatile uint32_t vsync_frame;
+static volatile uint32_t vsync_time_us;
+
+static void __scratch_x("") on_vsync(void)
+{
+    vsync_time_us = timer_hw->timerawl;
+    vsync_frame = video_frame_count;
+}
+
+#define RATE_WINDOW_S 10
+static uint32_t rate_hist_frame[RATE_WINDOW_S + 1];
+static uint32_t rate_hist_us[RATE_WINDOW_S + 1];
+static uint32_t rate_hist_count;
+
+// Call once a second. Returns true once a full window is available.
+static bool measure_frame_rate(screen_stats_t *st)
+{
+    uint32_t f, t;
+    do {
+        f = vsync_frame;
+        t = vsync_time_us;
+    } while (f != vsync_frame);
+
+    const uint32_t slot = rate_hist_count % (RATE_WINDOW_S + 1);
+    rate_hist_frame[slot] = f;
+    rate_hist_us[slot] = t;
+    rate_hist_count++;
+    if (rate_hist_count <= RATE_WINDOW_S) {
+        return false;
+    }
+    const uint32_t old = rate_hist_count % (RATE_WINDOW_S + 1);
+    const double frames = (double)(f - rate_hist_frame[old]);
+    const double seconds = (double)(t - rate_hist_us[old]) * 1e-6;
+    const double measured = frames / seconds;
+    const double nominal =
+        (double)(clock_get_hz(clk_hstx) / MODE_HSTX_CSR_CLKDIV) / (MODE_H_TOTAL_PIXELS * MODE_V_TOTAL_LINES);
+    st->frame_rate_mhz = (int32_t)(measured * 1000.0 + 0.5);
+    st->frame_ppm_x10 = (int32_t)((measured / nominal - 1.0) * 1e7 + (measured >= nominal ? 0.5 : -0.5));
+    st->rate_valid = true;
+    return true;
+}
+
+#define PROGRESS_WIDTH 64
+
+static void draw_static_rows(void)
+{
+    text_screen_printf(2, TEXT_PAL_HEADING, " STREAM");
+    text_screen_printf(3, TEXT_PAL_NORMAL,
+                       "  L-PCM, 8 channels, 48 kHz, 24-bit    HDMI Layout 1 packets, 2 per island");
+    // CTS = f_pixel * N / (128 * 48000) with N = 6144: f_pixel / 1000 exactly.
+    const uint32_t pixel_khz = clock_get_hz(clk_hstx) / MODE_HSTX_CSR_CLKDIV / 1000;
+    text_screen_printf(4, TEXT_PAL_NORMAL, "  Channel allocation 0x13 (7.1)        ACR N=6144 CTS=%lu",
+                       (unsigned long)pixel_khz);
+    text_screen_printf(5, TEXT_PAL_NORMAL,
+                       "  Video 640x480 VIC %d, %lu.%02lu MHz      System %lu.%lu MHz @ 1.15 V, HSTX div %d",
+                       MODE_CEA_VIC, (unsigned long)(pixel_khz / 1000), (unsigned long)(pixel_khz % 1000 / 10),
+                       (unsigned long)(SYS_CLOCK_KHZ / 1000), (unsigned long)(SYS_CLOCK_KHZ % 1000 / 100),
+                       MODE_HSTX_CLK_DIV);
+    // The boot ROM's flash divider stays in force on RP2350 (the SDK's
+    // PICO_FLASH_SPI_CLKDIV is not applied); show what the chip really uses.
+    const uint32_t flash_div = (qmi_hw->m[0].timing & QMI_M0_TIMING_CLKDIV_BITS) >> QMI_M0_TIMING_CLKDIV_LSB;
+    text_screen_printf(6, TEXT_PAL_DIM,
+                       "  Flash clock divider %lu (%lu MHz)       Line %d px x %d lines, %lu.%03lu Hz nominal",
+                       (unsigned long)flash_div, (unsigned long)(flash_div ? SYS_CLOCK_KHZ / 1000 / flash_div : 0),
+                       MODE_H_TOTAL_PIXELS, MODE_V_TOTAL_LINES,
+                       (unsigned long)(pixel_khz * 1000 / (MODE_H_TOTAL_PIXELS * MODE_V_TOTAL_LINES)),
+                       (unsigned long)((uint64_t)pixel_khz * 1000000 / (MODE_H_TOTAL_PIXELS * MODE_V_TOTAL_LINES) %
+                                       1000));
+    text_screen_printf(7, TEXT_PAL_HEADING, " SLOT  CODE  SPEAKER               TONE     STATE          TIMES PLAYED");
+    text_screen_printf(17, TEXT_PAL_HEADING, " NOW");
+    text_screen_printf(21, TEXT_PAL_HEADING, " STATISTICS");
+    text_screen_printf(28, TEXT_PAL_DIM, "  Sequence: 1.0 s tone at -12 dBFS, 0.5 s gap, slots 1 to 8 in turn.");
+    text_screen_printf(29, TEXT_PAL_DIM, "  A status line also goes out over USB serial once a second.");
+}
+
+static void update_screen(const screen_stats_t *st)
+{
+    // Snapshot the generator; Core 0 owns these, so they are consistent here.
+    const uint32_t pos = step_position;
+    const int ch = tone_channel;
+    const bool in_tone = pos < TONE_SAMPLES;
+
+    uint32_t up_s = (uint32_t)(time_us_64() / 1000000);
+    text_screen_printf(0, TEXT_PAL_TITLE, "  PICO_HDMI  8-CHANNEL HDMI AUDIO TEST %*s uptime %02lu:%02lu:%02lu  ", 20,
+                       "", (unsigned long)(up_s / 3600), (unsigned long)(up_s / 60 % 60), (unsigned long)(up_s % 60));
+
+    for (int c = 0; c < NUM_CHANNELS; c++) {
+        const bool playing = in_tone && c == ch;
+        const bool next = !in_tone && c == (ch + 1) % NUM_CHANNELS;
+        text_screen_printf(8 + c, playing ? TEXT_PAL_HIGHLIGHT : TEXT_PAL_NORMAL,
+                           "  %d    %-4s  %-20s  %3d Hz   %-13s  %lu", c + 1, channel_codes[c], channel_names[c],
+                           c == LFE_CHANNEL ? LFE_TONE_HZ : TONE_HZ,
+                           playing ? ">> PLAYING <<" : (next ? "next" : ""), (unsigned long)times_played[c]);
+    }
+
+    if (in_tone) {
+        uint32_t left_ms = (TONE_SAMPLES - pos) / (AUDIO_SAMPLE_RATE / 1000);
+        text_screen_printf(18, TEXT_PAL_NORMAL, "  Slot %d %s (%s): %d Hz tone, -12 dBFS        %lu.%02lu s left",
+                           ch + 1, channel_codes[ch], channel_names[ch], ch == LFE_CHANNEL ? LFE_TONE_HZ : TONE_HZ,
+                           (unsigned long)(left_ms / 1000), (unsigned long)(left_ms % 1000 / 10));
+    } else {
+        int nx = (ch + 1) % NUM_CHANNELS;
+        uint32_t left_ms = (STEP_SAMPLES - pos) / (AUDIO_SAMPLE_RATE / 1000);
+        text_screen_printf(18, TEXT_PAL_DIM, "  Silence, next: slot %d %s (%s)        %lu.%02lu s left", nx + 1,
+                           channel_codes[nx], channel_names[nx], (unsigned long)(left_ms / 1000),
+                           (unsigned long)(left_ms % 1000 / 10));
+    }
+
+    char bar[PROGRESS_WIDTH + 1];
+    const uint32_t filled = (uint32_t)(((uint64_t)pos * PROGRESS_WIDTH) / STEP_SAMPLES);
+    const uint32_t tone_end = (TONE_SAMPLES * PROGRESS_WIDTH) / STEP_SAMPLES;
+    for (uint32_t i = 0; i < PROGRESS_WIDTH; i++) {
+        bar[i] = i < filled ? (i < tone_end ? '#' : '=') : (i < tone_end ? '.' : ' ');
+    }
+    bar[PROGRESS_WIDTH] = '\0';
+    text_screen_printf(19, TEXT_PAL_NORMAL, "  [%s]", bar);
+
+    const uint32_t queue = hstx_di_queue_get_level();
+    text_screen_printf(22, TEXT_PAL_NORMAL, "  Samples sent   %-14llu  IEC 60958 frame   %3d / 192",
+                       (unsigned long long)samples_generated, audio_frame_counter);
+    text_screen_printf(23, TEXT_PAL_NORMAL, "  Audio queue    %3lu / 255 islands (%lu.%lu ms)   Underruns         %lu",
+                       (unsigned long)queue, (unsigned long)(queue * 2 * 10 / 480),
+                       (unsigned long)(queue * 2 * 100 / 480 % 10), (unsigned long)hstx_di_queue_silence_count);
+    text_screen_printf(24, TEXT_PAL_NORMAL, "  Video frames   %-14lu  Frame rate        %lu fps",
+                       (unsigned long)st->frames, (unsigned long)st->fps);
+    // Core 1 renders 480 text lines 60 times a second.
+    const uint32_t core1_pct_x10 = (uint32_t)(((uint64_t)st->render_ns_per_line * 480 * 60) / 1000000);
+    text_screen_printf(25, TEXT_PAL_NORMAL,
+                       "  Core 0 audio   %lu %%            Core 1 text render %lu.%lu %% (%lu.%lu us/line)",
+                       (unsigned long)st->core0_load_pct, (unsigned long)(core1_pct_x10 / 10),
+                       (unsigned long)(core1_pct_x10 % 10), (unsigned long)(st->render_ns_per_line / 1000),
+                       (unsigned long)(st->render_ns_per_line % 1000 / 100));
+    if (st->rate_valid) {
+        const int32_t ppm10 = st->frame_ppm_x10;
+        const int32_t mag = ppm10 < 0 ? -ppm10 : ppm10;
+        text_screen_printf(26, TEXT_PAL_NORMAL,
+                           "  Measured rate  %ld.%03ld Hz      vs nominal %c%ld.%ld ppm (10 s window)",
+                           (long)(st->frame_rate_mhz / 1000), (long)(st->frame_rate_mhz % 1000), ppm10 < 0 ? '-' : '+',
+                           (long)(mag / 10), (long)(mag % 10));
+    } else {
+        text_screen_printf(26, TEXT_PAL_DIM, "  Measured rate  (needs 10 s)");
+    }
+    if (st->hook_status) {
+        text_screen_printf(27, TEXT_PAL_HEADING, "  %s", st->hook_status);
     }
 }
 
-static const uint32_t *__scratch_x("") scanline_pointer(uint32_t v_scanline, uint32_t active_line)
+// Time the scanline renderer over a full frame. Runs on Core 0 before Core 1
+// starts, as an estimate of what the video interrupt spends per line.
+static uint32_t measure_render_ns_per_line(void)
 {
-    (void)v_scanline;
-    (void)active_line;
-    return channel_lines[display_channel + 1];
+    uint64_t t0 = time_us_64();
+    for (uint32_t line = 0; line < 480 * 4; line++) {
+        (void)text_screen_scanline(0, line % FRAME_HEIGHT);
+    }
+    return (uint32_t)((time_us_64() - t0) * 1000 / (480 * 4));
 }
 
 // ============================================================================
@@ -228,8 +406,12 @@ static const uint32_t *__scratch_x("") scanline_pointer(uint32_t v_scanline, uin
 
 int main(void)
 {
-    // 480p60: set system clock to 126 MHz for HSTX timing (25.2 MHz pixel clock).
-    set_sys_clock_khz(126000, true);
+    // 252 MHz needs a little more than the default 1.10 V core voltage. The
+    // flash interface keeps the boot ROM's divider (shown on screen), well
+    // within the Pico 2 flash's rating.
+    vreg_set_voltage(VREG_VOLTAGE_1_15);
+    sleep_ms(10);
+    set_sys_clock_khz(SYS_CLOCK_KHZ, true);
 
     stdio_init_all();
 
@@ -245,8 +427,12 @@ int main(void)
     TRACE("start\n");
 
     init_sine_table();
-    init_channel_lines();
-    TRACE("sine table done\n");
+    text_screen_init();
+    draw_static_rows();
+    screen_stats_t stats = {0};
+    update_screen(&stats);
+    stats.render_ns_per_line = measure_render_ns_per_line();
+    TRACE("sine table and screen done, render %lu ns/line\n", (unsigned long)stats.render_ns_per_line);
 
     // Initialize HDMI output
     hstx_di_queue_init();
@@ -254,7 +440,8 @@ int main(void)
     video_output_init(FRAME_WIDTH, FRAME_HEIGHT);
     TRACE("video_output_init done\n");
     pico_hdmi_set_audio_sample_rate(AUDIO_SAMPLE_RATE);
-    video_output_set_scanline_pointer_callback(scanline_pointer);
+    video_output_set_scanline_pointer_callback(text_screen_scanline);
+    video_output_set_vsync_callback(on_vsync);
     TRACE("audio rate set\n");
 
 #if AUDIO_8CH_TEST_VIDEO_ONLY
@@ -278,6 +465,8 @@ int main(void)
     uint64_t window_start = time_us_64();
     uint64_t busy_us = 0;
     uint32_t last_led_frame = 0;
+    uint32_t window_frames = 0;
+    uint64_t last_screen_update = 0;
 
     while (1) {
 #if !AUDIO_8CH_TEST_VIDEO_ONLY
@@ -298,6 +487,7 @@ int main(void)
         }
 
         uint64_t now = time_us_64();
+        stats.hook_status = audio_8ch_test_hook(now);
 #if AUDIO_8CH_TEST_TRACE
         static uint64_t last_trace;
         static uint32_t loops, traces;
@@ -307,14 +497,36 @@ int main(void)
             traces++;
             TRACE("loop %lu frames %lu queue %lu underruns %lu\n", (unsigned long)loops, (unsigned long)frames,
                   (unsigned long)hstx_di_queue_get_level(), (unsigned long)hstx_di_queue_silence_count);
+            if (traces == 25) {
+                text_screen_dump();
+            }
         }
 #endif
+        if (now - last_screen_update >= SCREEN_UPDATE_US) {
+            last_screen_update = now;
+            stats.frames = frames;
+            update_screen(&stats);
+        }
         if (now - window_start >= 1000000) {
             uint32_t load_pct = (uint32_t)((busy_us * 100) / (now - window_start));
+            stats.core0_load_pct = load_pct;
+            stats.fps = (uint32_t)(((uint64_t)(frames - window_frames) * 1000000) / (now - window_start));
+            window_frames = frames;
+            const bool rate_ok = measure_frame_rate(&stats);
             int ch = display_channel;
-            printf("frames %lu | queue %lu | underruns %lu | core0 audio load %lu%% | %s%s\n", (unsigned long)frames,
+            printf("frames %lu | queue %lu | underruns %lu | core0 audio load %lu%% | %s%s", (unsigned long)frames,
                    (unsigned long)hstx_di_queue_get_level(), (unsigned long)hstx_di_queue_silence_count,
                    (unsigned long)load_pct, ch >= 0 ? "playing " : "gap", ch >= 0 ? channel_names[ch] : "");
+            if (rate_ok) {
+                const int32_t mag = stats.frame_ppm_x10 < 0 ? -stats.frame_ppm_x10 : stats.frame_ppm_x10;
+                printf(" | rate %ld.%03ld Hz %c%ld.%ld ppm", (long)(stats.frame_rate_mhz / 1000),
+                       (long)(stats.frame_rate_mhz % 1000), stats.frame_ppm_x10 < 0 ? '-' : '+', (long)(mag / 10),
+                       (long)(mag % 10));
+            }
+            if (stats.hook_status) {
+                printf(" | %s", stats.hook_status);
+            }
+            printf("\n");
             window_start = now;
             busy_us = 0;
         }

@@ -15,12 +15,16 @@ pico_sdk_init()
 
 # 8-channel 48 kHz 24-bit audio. Must be set before the library is added.
 set(PICO_HDMI_AUDIO_8CH ON CACHE BOOL "8-channel 48 kHz 24-bit HDMI audio (Layout 1 packets)" FORCE)
+# The demo runs at 252 MHz; HSTX divides that by 2 to keep the 126 MHz
+# (25.2 MHz pixel) clock of standard 640x480 @ 60 Hz.
+set(PICO_HDMI_HSTX_CLK_DIV "2" CACHE STRING "Override MODE_HSTX_CLK_DIV; empty keeps mode default" FORCE)
 
 # Add pico_hdmi library
 add_subdirectory(../.. pico_hdmi)
 
 add_executable(audio_8ch_test
     main.c
+    text_screen.c
 )
 
 target_link_libraries(audio_8ch_test
