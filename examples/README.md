@@ -111,3 +111,39 @@ Flash the resulting `directvideo_240p.uf2` to your Pico 2.
 ### Hardware
 
 Same HSTX pinout as bouncing_box above.
+
+## audio_8ch_test
+
+Proof of concept for 8-channel HDMI audio (`PICO_HDMI_AUDIO_8CH`):
+
+- 640x480 @ 60Hz at the stock 126 MHz clock
+- 8-channel 48 kHz 24-bit L-PCM, 7.1 channel allocation (CA 0x13)
+- Plays 1 s of tone, then 0.5 s of silence, on channels 1 to 8 in turn:
+  FL, FR, LFE, FC, RL, RR, RLC, RRC. The tone is 440 Hz, except on LFE,
+  which gets 60 Hz because receivers low-pass that channel.
+- The screen shows eight columns; the playing channel's column is green.
+  The nine possible lines are drawn once at startup and handed to the video
+  interrupt by pointer, so the display costs almost nothing.
+- The LED blinks once per second while video frames are being produced.
+- USB serial prints a status line every second: video frame count, queue
+  level, underrun count (it should stay at 0), Core 0 audio load, and the
+  playing channel.
+
+Generating the audio takes about 75-80% of Core 0 at the stock 126 MHz
+(about 30 us per two-frame island, 24,000 islands per second). It keeps up
+with no underruns, but leaves Core 0 little room for other work.
+
+Diagnostic build options: `-DAUDIO_8CH_TEST_VIDEO_ONLY=ON` sends plain DVI
+video with no audio; `-DAUDIO_8CH_TEST_TRACE=ON` prints startup markers and a
+10 Hz heartbeat over USB serial.
+
+```bash
+cd examples/audio_8ch_test
+mkdir build && cd build
+cmake ..
+make
+```
+
+The sink must accept multichannel L-PCM; a TV's own speakers usually play
+only channels 1 and 2. Use an AV receiver or a capture device that reports
+8-channel audio.

@@ -164,6 +164,28 @@ pico_hdmi_set_audio_sample_rate(44100);
 
 Supported rates: 32000, 44100, 48000, 88200, 96000, 176400, 192000 Hz.
 
+## 8-Channel Audio (experimental)
+
+Configure with `-DPICO_HDMI_AUDIO_8CH=ON` to send 8-channel, 48 kHz, 24-bit
+L-PCM instead of stereo. The library then sends HDMI Layout 1 audio sample
+packets, one 8-channel frame each, two per Data Island. The Audio InfoFrame
+declares 8 channels with the 7.1 allocation (CA 0x13: FL FR LFE FC RL RR RLC RRC).
+
+```c
+audio_sample_8ch_t a, b;           // fill a.ch[0..7], b.ch[0..7] (24-bit signed)
+hstx_packet_t pa, pb;
+frame = hstx_packet_set_audio_sample_8ch(&pa, &a, frame, 48000);
+frame = hstx_packet_set_audio_sample_8ch(&pb, &b, frame, 48000);
+hstx_data_island2_t island;
+hstx_encode_data_island2(&island, &pa, &pb, false, DI_HSYNC_ACTIVE);
+hstx_di_queue_push_8ch(&island);
+```
+
+Limits: compile-time backend only (`PICO_HDMI_RUNTIME_MODES=OFF`), no
+precomposed active lines, and not in 240p mode (its line rate is too low for
+48 kHz at one island per line). The stereo push API is not available in this
+build. See `examples/audio_8ch_test`.
+
 ## Scanline Callback Timing
 
 The scanline callback runs during h-blank with very limited time:

@@ -237,6 +237,12 @@ void hstx_packet_set_acr(hstx_packet_t *packet, uint32_t n, uint32_t cts)
 void hstx_packet_set_audio_infoframe(hstx_packet_t *packet, uint32_t sample_rate, uint8_t channels,
                                      uint8_t bits_per_sample)
 {
+    hstx_packet_set_audio_infoframe_ca(packet, sample_rate, channels, bits_per_sample, HSTX_AUDIO_CA_STEREO);
+}
+
+void hstx_packet_set_audio_infoframe_ca(hstx_packet_t *packet, uint32_t sample_rate, uint8_t channels,
+                                        uint8_t bits_per_sample, uint8_t channel_allocation)
+{
     hstx_packet_init(packet);
     packet->header[0] = 0x84;
     packet->header[1] = 0x01;
@@ -251,7 +257,7 @@ void hstx_packet_set_audio_infoframe(hstx_packet_t *packet, uint32_t sample_rate
     packet->subpacket[0][1] = cc | (ct << 4);
     packet->subpacket[0][2] = ss | (sf << 2);
     packet->subpacket[0][3] = 0x00;
-    packet->subpacket[0][4] = 0x00;
+    packet->subpacket[0][4] = channel_allocation;
     packet->subpacket[0][5] = 0x00;
 
     compute_infoframe_checksum(packet);
@@ -381,7 +387,12 @@ static uint8_t channel_status_sample_frequency(uint32_t sample_rate)
     }
 }
 
-static inline int channel_status_bit(int frame, uint32_t sample_rate)
+// Byte 4 word-length codes: 0x00 = not indicated, 0x0B = 24 bits (maximum
+// 24 bits, word length 24).
+#define CHANNEL_STATUS_WORD_LENGTH_NONE 0x00
+#define CHANNEL_STATUS_WORD_LENGTH_24 0x0B
+
+static inline int channel_status_bit_wl(int frame, uint32_t sample_rate, uint8_t word_length)
 {
     if (frame >= 40)
         return 0;
@@ -391,7 +402,14 @@ static inline int channel_status_bit(int frame, uint32_t sample_rate)
         value = 0x04;
     else if (frame >= 24 && frame < 32)
         value = channel_status_sample_frequency(sample_rate);
+    else if (frame >= 32)
+        value = word_length;
     return (value >> (frame & 7)) & 1;
+}
+
+static inline int channel_status_bit(int frame, uint32_t sample_rate)
+{
+    return channel_status_bit_wl(frame, sample_rate, CHANNEL_STATUS_WORD_LENGTH_NONE);
 }
 
 int hstx_packet_set_audio_samples_cs_rate(hstx_packet_t *packet, const audio_sample_t *samples, int num_samples,
@@ -443,6 +461,44 @@ int hstx_packet_set_audio_samples_cs_rate(hstx_packet_t *packet, const audio_sam
     }
 
     return temp_frame_count;
+}
+
+int hstx_packet_set_audio_sample_8ch(hstx_packet_t *packet, const audio_sample_8ch_t *sample, int frame_count,
+                                     uint32_t sample_rate)
+{
+    hstx_packet_init(packet);
+
+    // Layout 1 carries one frame per packet, so every subpacket holds the
+    // same IEC 60958 frame: all four B flags mark the block start together.
+    packet->header[0] = 0x02;
+    packet->header[1] = 0x10 | 0x0F; // layout=1, sample_present.sp0..sp3
+    packet->header[2] = (frame_count == 0) ? 0xF0 : 0x00;
+    compute_header_parity(packet);
+
+    int c = channel_status_bit_wl(frame_count, sample_rate, CHANNEL_STATUS_WORD_LENGTH_24);
+
+    for (int i = 0; i < 4; i++) {
+        uint8_t *d = packet->subpacket[i];
+        int32_t a = sample->ch[2 * i];
+        int32_t b = sample->ch[(2 * i) + 1];
+
+        d[0] = a & 0xFF;
+        d[1] = (a >> 8) & 0xFF;
+        d[2] = (a >> 16) & 0xFF;
+        d[3] = b & 0xFF;
+        d[4] = (b >> 8) & 0xFF;
+        d[5] = (b >> 16) & 0xFF;
+
+        // Parity covers the 24-bit sample plus V, U, C (V=U=0 here).
+        int p_a = (int)compute_parity3(d[0], d[1], d[2]) ^ c;
+        int p_b = (int)compute_parity3(d[3], d[4], d[5]) ^ c;
+
+        // Byte 6: VL UL CL PL VR UR CR PR (bits 0..7).
+        d[6] = (uint8_t)((c << 2) | (p_a << 3) | (c << 6) | (p_b << 7));
+        compute_subpacket_parity(packet, i);
+    }
+
+    return (frame_count + 1) % 192;
 }
 
 int hstx_packet_set_audio_samples_cs(hstx_packet_t *packet, const audio_sample_t *samples, int num_samples,
@@ -549,30 +605,59 @@ static void encode_subpackets_to_lanes(const hstx_packet_t *packet, uint16_t *la
     }
 }
 
-void hstx_encode_data_island(hstx_data_island_t *out, const hstx_packet_t *packet, bool vsync_active, bool hsync_active)
+// vsync_active/hsync_active indicate pulse region, not wire level.
+// The hv field encodes the actual wire bits (bit1=vsync, bit0=hsync), so
+// pulse-region semantics are inverted for negative-polarity modes.
+static int data_island_hv(bool vsync_active, bool hsync_active)
 {
-    // vsync_active/hsync_active indicate pulse region, not wire level.
-    // The hv field encodes the actual wire bits (bit1=vsync, bit0=hsync), so
-    // pulse-region semantics are inverted for negative-polarity modes.
     const bool vsync_positive = hstx_packet_get_vsync_positive();
     const bool hsync_positive = hstx_packet_get_hsync_positive();
-    int hv = (vsync_active == vsync_positive ? 2 : 0) | (hsync_active == hsync_positive ? 1 : 0);
+    return (vsync_active == vsync_positive ? 2 : 0) | (hsync_active == hsync_positive ? 1 : 0);
+}
+
+static inline uint32_t data_island_guard_word(int hv)
+{
+    return make_hstx_word(ter_c4[0xC | hv], GUARD_BAND_SYMBOL, GUARD_BAND_SYMBOL);
+}
+
+// Write one packet's 32 words (no guard bands) starting at out.
+static void encode_packet_words(uint32_t *out, const hstx_packet_t *packet, int hv, bool first_packet)
+{
     uint16_t lane0[32];
     uint16_t lane1[32];
     uint16_t lane2[32];
 
-    encode_header_to_lane0(packet, lane0, hv, true);
+    encode_header_to_lane0(packet, lane0, hv, first_packet);
     encode_subpackets_to_lanes(packet, lane1, lane2);
 
-    uint16_t gb_lane0 = ter_c4[0xC | hv];
-    uint32_t guard_word = make_hstx_word(gb_lane0, GUARD_BAND_SYMBOL, GUARD_BAND_SYMBOL);
+    for (int i = 0; i < 32; i++)
+        out[i] = make_hstx_word(lane0[i], lane1[i], lane2[i]);
+}
+
+void hstx_encode_data_island(hstx_data_island_t *out, const hstx_packet_t *packet, bool vsync_active, bool hsync_active)
+{
+    int hv = data_island_hv(vsync_active, hsync_active);
+    uint32_t guard_word = data_island_guard_word(hv);
 
     out->words[0] = guard_word;
     out->words[1] = guard_word;
-    for (int i = 0; i < 32; i++)
-        out->words[i + 2] = make_hstx_word(lane0[i], lane1[i], lane2[i]);
+    encode_packet_words(&out->words[2], packet, hv, true);
     out->words[34] = guard_word;
     out->words[35] = guard_word;
+}
+
+void hstx_encode_data_island2(hstx_data_island2_t *out, const hstx_packet_t *first, const hstx_packet_t *second,
+                              bool vsync_active, bool hsync_active)
+{
+    int hv = data_island_hv(vsync_active, hsync_active);
+    uint32_t guard_word = data_island_guard_word(hv);
+
+    out->words[0] = guard_word;
+    out->words[1] = guard_word;
+    encode_packet_words(&out->words[2], first, hv, true);
+    encode_packet_words(&out->words[2 + W_DATA_PACKET], second, hv, false);
+    out->words[W_DATA_ISLAND_2 - 2] = guard_word;
+    out->words[W_DATA_ISLAND_2 - 1] = guard_word;
 }
 
 static void init_null_islands(void)

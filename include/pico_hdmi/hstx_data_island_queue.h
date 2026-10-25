@@ -6,6 +6,21 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#ifndef PICO_HDMI_AUDIO_8CH
+#define PICO_HDMI_AUDIO_8CH 0
+#endif
+
+// Audio Data Island geometry. The stereo build queues one-packet islands of
+// four samples each. The 8-channel build (PICO_HDMI_AUDIO_8CH) queues
+// two-packet islands, each packet one Layout 1 frame, so two samples each.
+#if PICO_HDMI_AUDIO_8CH
+#define HSTX_DI_AUDIO_ISLAND_WORDS W_DATA_ISLAND_2
+#define HSTX_DI_AUDIO_SAMPLES_PER_ISLAND 2
+#else
+#define HSTX_DI_AUDIO_ISLAND_WORDS W_DATA_ISLAND
+#define HSTX_DI_AUDIO_SAMPLES_PER_ISLAND 4
+#endif
+
 /**
  * Initialize the Data Island queue and scheduler.
  */
@@ -17,11 +32,20 @@ void hstx_di_queue_init(void);
  */
 void hstx_di_queue_set_sample_rate(uint32_t sample_rate);
 
+#if PICO_HDMI_AUDIO_8CH
+/**
+ * Push a pre-encoded two-packet audio Data Island (two 8-channel frames,
+ * see hstx_packet_set_audio_sample_8ch and hstx_encode_data_island2).
+ * Returns true if successful, false if the queue is full.
+ */
+bool hstx_di_queue_push_8ch(const hstx_data_island2_t *island);
+#else
 /**
  * Push a pre-encoded Data Island into the queue.
  * Returns true if successful, false if the queue is full.
  */
 bool hstx_di_queue_push(const hstx_data_island_t *island);
+#endif
 
 /**
  * Get the current number of items in the queue.
@@ -30,7 +54,8 @@ uint32_t hstx_di_queue_get_level(void);
 
 /**
  * Times the queue ran dry at a scheduled audio slot and a silence packet
- * was inserted instead (each one stretches the real stream by 4 samples).
+ * was inserted instead (each one stretches the real stream by
+ * HSTX_DI_AUDIO_SAMPLES_PER_ISLAND samples).
  * Climbing while audio plays = producer starvation.
  */
 extern volatile uint32_t hstx_di_queue_silence_count;
@@ -76,7 +101,8 @@ void hstx_di_queue_tick(void);
 /**
  * Get the next audio Data Island packet if the scheduler determines it's time.
  *
- * @return Pointer to 36-word HSTX data island, or NULL if no packet is due.
+ * @return Pointer to an HSTX_DI_AUDIO_ISLAND_WORDS-word data island, or NULL
+ *         if no packet is due.
  */
 const uint32_t *hstx_di_queue_get_audio_packet(void);
 
