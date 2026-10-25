@@ -2608,6 +2608,46 @@ void video_output_set_vsync_callback(video_output_vsync_cb_t cb)
     vsync_callback = cb;
 }
 
+// Core 1's idle loop runs from RAM. Core 1 cannot take the scanline
+// interrupt until its current instruction fetch completes, and a fetch that
+// misses the XIP cache waits on the QSPI bus, which Core 0's own flash
+// fetches also use: added interrupt latency that eats into the scanline
+// deadline. The background task, if any, should be in RAM too.
+// Mode switches and resyncs call into flash, but only when requested; the
+// pipelined double-buffer fill (PICO_HDMI_ACTIVE_LINE_DOUBLE_BUFFER) is
+// still called from flash on every pass.
+static void __no_inline_not_in_flash_func(core1_idle_loop)(void)
+{
+    while (1) {
+        // Check for pending mode switch
+        const video_mode_t *new_mode = (const video_mode_t *)pending_mode;
+        if (new_mode) {
+            pending_mode = NULL;
+            apply_mode(new_mode);
+        }
+
+        // Check for resync request
+        if (resync_requested) {
+            resync_requested = false;
+            irq_set_enabled(DMA_IRQ_0, false);
+            hstx_resync();
+            irq_set_enabled(DMA_IRQ_0, true);
+        }
+
+#if PICO_HDMI_ACTIVE_LINE_DOUBLE_BUFFER
+        // Service any pending pipelined-scanout fill request before the
+        // (firmware-supplied) background_task(), so it isn't starved by
+        // whatever that does.
+        video_output_service_double_buffer_fill();
+#endif
+
+        if (background_task) {
+            background_task();
+        }
+        tight_loop_contents();
+    }
+}
+
 void video_output_core1_run(void)
 {
     // HSTX Hardware Setup
@@ -2697,34 +2737,7 @@ void video_output_core1_run(void)
     // NOW connect GPIO — TV's first TMDS exposure is valid data
     pico_hdmi_hstx_connect_pins(true);
 
-    while (1) {
-        // Check for pending mode switch
-        const video_mode_t *new_mode = (const video_mode_t *)pending_mode;
-        if (new_mode) {
-            pending_mode = NULL;
-            apply_mode(new_mode);
-        }
-
-        // Check for resync request
-        if (resync_requested) {
-            resync_requested = false;
-            irq_set_enabled(DMA_IRQ_0, false);
-            hstx_resync();
-            irq_set_enabled(DMA_IRQ_0, true);
-        }
-
-#if PICO_HDMI_ACTIVE_LINE_DOUBLE_BUFFER
-        // Service any pending pipelined-scanout fill request before the
-        // (firmware-supplied) background_task(), so it isn't starved by
-        // whatever that does.
-        video_output_service_double_buffer_fill();
-#endif
-
-        if (background_task) {
-            background_task();
-        }
-        tight_loop_contents();
-    }
+    core1_idle_loop();
 }
 
 void pico_hdmi_set_audio_sample_rate(uint32_t sample_rate)
