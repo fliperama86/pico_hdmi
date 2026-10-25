@@ -6,6 +6,21 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#ifndef PICO_HDMI_AUDIO_8CH
+#define PICO_HDMI_AUDIO_8CH 0
+#endif
+
+// Audio Data Island geometry. The stereo build queues one-packet islands of
+// four samples each. The 8-channel build (PICO_HDMI_AUDIO_8CH) queues
+// two-packet islands, each packet one Layout 1 frame, so two samples each.
+#if PICO_HDMI_AUDIO_8CH
+#define HSTX_DI_AUDIO_ISLAND_WORDS W_DATA_ISLAND_2
+#define HSTX_DI_AUDIO_SAMPLES_PER_ISLAND 2
+#else
+#define HSTX_DI_AUDIO_ISLAND_WORDS W_DATA_ISLAND
+#define HSTX_DI_AUDIO_SAMPLES_PER_ISLAND 4
+#endif
+
 /**
  * Initialize the Data Island queue and scheduler.
  */
@@ -17,11 +32,29 @@ void hstx_di_queue_init(void);
  */
 void hstx_di_queue_set_sample_rate(uint32_t sample_rate);
 
+#if PICO_HDMI_AUDIO_8CH
+/**
+ * Push a pre-encoded two-packet audio Data Island (two 8-channel frames,
+ * see hstx_packet_set_audio_sample_8ch and hstx_encode_data_island2).
+ * Returns true if successful, false if the queue is full.
+ */
+bool hstx_di_queue_push_8ch(const hstx_data_island2_t *island);
+
+/**
+ * Zero-copy push: return the next free slot to encode an island into, or
+ * NULL if the queue is full. The slot goes out only after
+ * hstx_di_queue_commit_8ch(). Single producer: do not mix with push calls
+ * between a reserve and its commit.
+ */
+hstx_data_island2_t *hstx_di_queue_reserve_8ch(void);
+void hstx_di_queue_commit_8ch(void);
+#else
 /**
  * Push a pre-encoded Data Island into the queue.
  * Returns true if successful, false if the queue is full.
  */
 bool hstx_di_queue_push(const hstx_data_island_t *island);
+#endif
 
 /**
  * Get the current number of items in the queue.
@@ -29,8 +62,26 @@ bool hstx_di_queue_push(const hstx_data_island_t *island);
 uint32_t hstx_di_queue_get_level(void);
 
 /**
+ * Get the number of items that can be pushed before the queue is full.
+ */
+uint32_t hstx_di_queue_get_free(void);
+
+/**
+ * Audio sample rate the queue is pacing for (set by hstx_di_queue_set_sample_rate).
+ */
+uint32_t hstx_di_queue_get_sample_rate(void);
+
+/**
+ * Audio islands the scheduler has sent, queued or silence. Advances at the
+ * HDMI audio rate (HSTX_DI_AUDIO_SAMPLES_PER_ISLAND samples per island) for
+ * as long as video runs; wraps at 2^32.
+ */
+extern volatile uint32_t hstx_di_queue_islands_sent;
+
+/**
  * Times the queue ran dry at a scheduled audio slot and a silence packet
- * was inserted instead (each one stretches the real stream by 4 samples).
+ * was inserted instead (each one stretches the real stream by
+ * HSTX_DI_AUDIO_SAMPLES_PER_ISLAND samples).
  * Climbing while audio plays = producer starvation.
  */
 extern volatile uint32_t hstx_di_queue_silence_count;
@@ -76,7 +127,8 @@ void hstx_di_queue_tick(void);
 /**
  * Get the next audio Data Island packet if the scheduler determines it's time.
  *
- * @return Pointer to 36-word HSTX data island, or NULL if no packet is due.
+ * @return Pointer to an HSTX_DI_AUDIO_ISLAND_WORDS-word data island, or NULL
+ *         if no packet is due.
  */
 const uint32_t *hstx_di_queue_get_audio_packet(void);
 

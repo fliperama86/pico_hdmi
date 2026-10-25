@@ -13,6 +13,10 @@
 // HSTX outputs 1 symbol per word
 #define HSTX_DATA_ISLAND_WORDS W_DATA_ISLAND // 36 words for HSTX
 
+// A Data Island carrying two back-to-back packets: one leading guard band,
+// two 32-pixel packets, one trailing guard band (68 words).
+#define W_DATA_ISLAND_2 (W_GUARDBAND + (2 * W_DATA_PACKET) + W_GUARDBAND)
+
 // Packet structure (same as DVI/HSTX spec)
 typedef struct {
     uint8_t header[4];       // 3 bytes header + 1 byte BCH parity
@@ -24,11 +28,29 @@ typedef struct {
     uint32_t words[HSTX_DATA_ISLAND_WORDS];
 } hstx_data_island_t;
 
+// Pre-encoded two-packet data island for HSTX (68 words)
+typedef struct {
+    uint32_t words[W_DATA_ISLAND_2];
+} hstx_data_island2_t;
+
 // Audio sample structure
 typedef struct {
     int16_t left;
     int16_t right;
 } audio_sample_t;
+
+// One 8-channel audio frame. Each entry is a signed 24-bit sample held in the
+// low 24 bits of an int32_t (range -8388608..8388607). Channel n goes to
+// HDMI audio slot n+1; with channel allocation 0x13 (7.1) the slots are
+// FL, FR, LFE, FC, RL, RR, RLC, RRC.
+#define HSTX_AUDIO_8CH_CHANNELS 8
+typedef struct {
+    int32_t ch[HSTX_AUDIO_8CH_CHANNELS];
+} audio_sample_8ch_t;
+
+// CTA-861 Audio InfoFrame channel allocation (CA) codes.
+#define HSTX_AUDIO_CA_STEREO 0x00
+#define HSTX_AUDIO_CA_7_1 0x13 // FL FR LFE FC RL RR RLC RRC
 
 // ============================================================================
 // Packet creation functions
@@ -38,6 +60,10 @@ void hstx_packet_init(hstx_packet_t *packet);
 void hstx_packet_set_acr(hstx_packet_t *packet, uint32_t n, uint32_t cts);
 void hstx_packet_set_audio_infoframe(hstx_packet_t *packet, uint32_t sample_rate, uint8_t channels,
                                      uint8_t bits_per_sample);
+// As above, with an explicit channel allocation code (PB4), which multichannel
+// streams need so the sink knows which speaker each slot feeds.
+void hstx_packet_set_audio_infoframe_ca(hstx_packet_t *packet, uint32_t sample_rate, uint8_t channels,
+                                        uint8_t bits_per_sample, uint8_t channel_allocation);
 void hstx_packet_set_avi_infoframe(hstx_packet_t *packet, uint8_t vic, uint8_t pixel_repetition);
 void hstx_packet_set_avi_infoframe_aspect(hstx_packet_t *packet, uint8_t vic, uint8_t pixel_repetition,
                                           bool aspect_16_9);
@@ -77,6 +103,12 @@ int hstx_packet_set_audio_samples_cs(hstx_packet_t *packet, const audio_sample_t
 // Sample-rate-aware form used when the stream is not 48 kHz.
 int hstx_packet_set_audio_samples_cs_rate(hstx_packet_t *packet, const audio_sample_t *samples, int num_samples,
                                           int frame_count, uint32_t sample_rate);
+// Layout 1 audio sample packet: one 8-channel, 24-bit L-PCM frame, channel
+// pairs 1-2, 3-4, 5-6, 7-8 in subpackets 0-3. Carries IEC 60958 consumer
+// channel status (L-PCM, given sample rate, 24-bit word length). Returns the
+// next frame_count (frame_count + 1, modulo 192).
+int hstx_packet_set_audio_sample_8ch(hstx_packet_t *packet, const audio_sample_8ch_t *sample, int frame_count,
+                                     uint32_t sample_rate);
 void hstx_packet_set_null(hstx_packet_t *packet);
 
 // ============================================================================
@@ -87,6 +119,10 @@ void hstx_packet_set_sync_positive(bool positive);
 bool hstx_packet_get_sync_positive(void);
 void hstx_packet_set_sync_polarity(bool hsync_positive, bool vsync_positive);
 void hstx_encode_data_island(hstx_data_island_t *out, const hstx_packet_t *packet, bool vsync, bool hsync);
+// Encode two packets as one Data Island. Only the island's first pixel has
+// TERC4 channel 0 bit 3 clear; the second packet is encoded with it set.
+void hstx_encode_data_island2(hstx_data_island2_t *out, const hstx_packet_t *first, const hstx_packet_t *second,
+                              bool vsync, bool hsync);
 const uint32_t *hstx_get_null_data_island(bool vsync, bool hsync);
 
 #endif // HSTX_PACKET_H

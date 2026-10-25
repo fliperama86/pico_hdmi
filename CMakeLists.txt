@@ -22,7 +22,18 @@ option(PICO_HDMI_PIXEL_FORMAT_RGB888
 # (2x/4x) are unaffected even when this is on. See video_output_rt.c.
 option(PICO_HDMI_ACTIVE_LINE_DOUBLE_BUFFER
     "EXPERIMENTAL: pipeline the 3x (720p-class) active-line scanout across two buffers, decoupling the scanline callback from the per-line ISR deadline" OFF)
+# 8-channel L-PCM audio (48 kHz, 24-bit, 7.1 channel allocation) using HDMI
+# Layout 1 audio sample packets, two per Data Island. Compile-time backend
+# (video_output.c) only, without precomposed active lines.
+option(PICO_HDMI_AUDIO_8CH "8-channel 48 kHz 24-bit HDMI audio (Layout 1 packets)" OFF)
 set(PICO_HDMI_HSTX_CLK_DIV "" CACHE STRING "Override MODE_HSTX_CLK_DIV; empty keeps mode default")
+
+if(PICO_HDMI_AUDIO_8CH AND PICO_HDMI_RUNTIME_MODES)
+    message(FATAL_ERROR "PICO_HDMI_AUDIO_8CH is only supported by the compile-time backend (PICO_HDMI_RUNTIME_MODES=OFF)")
+endif()
+if(PICO_HDMI_AUDIO_8CH AND PICO_HDMI_PRECOMPOSED_ACTIVE_LINES)
+    message(FATAL_ERROR "PICO_HDMI_AUDIO_8CH does not support PICO_HDMI_PRECOMPOSED_ACTIVE_LINES")
+endif()
 
 if(PICO_HDMI_RUNTIME_MODES)
     set(PICO_HDMI_VIDEO_OUTPUT_SRC src/video_output_rt.c)
@@ -32,6 +43,7 @@ endif()
 
 add_library(pico_hdmi
     ${PICO_HDMI_VIDEO_OUTPUT_SRC}
+    src/hdmi_audio_8ch.c
     src/hstx_data_island_queue.c
     src/hstx_packet.c
     src/hstx_pins.c
@@ -55,6 +67,7 @@ target_compile_definitions(pico_hdmi PUBLIC
     PICO_HDMI_EXACT_AUDIO_PACING=$<BOOL:${PICO_HDMI_EXACT_AUDIO_PACING}>
     PICO_HDMI_FRANK_PAD_CONFIG=$<BOOL:${PICO_HDMI_FRANK_PAD_CONFIG}>
     PICO_HDMI_PIXEL_FORMAT_RGB888=$<BOOL:${PICO_HDMI_PIXEL_FORMAT_RGB888}>
+    PICO_HDMI_AUDIO_8CH=$<BOOL:${PICO_HDMI_AUDIO_8CH}>
 )
 
 target_compile_definitions(pico_hdmi PRIVATE

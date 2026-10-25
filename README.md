@@ -164,6 +164,39 @@ pico_hdmi_set_audio_sample_rate(44100);
 
 Supported rates: 32000, 44100, 48000, 88200, 96000, 176400, 192000 Hz.
 
+## 8-Channel Audio (experimental)
+
+Configure with `-DPICO_HDMI_AUDIO_8CH=ON` to send 8-channel, 48 kHz, 24-bit
+L-PCM instead of stereo. The library then sends HDMI Layout 1 audio sample
+packets, one 8-channel frame each, two per Data Island. The Audio InfoFrame
+declares 8 channels with the 7.1 allocation (CA 0x13: FL FR LFE FC RL RR RLC RRC).
+
+Audio goes in as plain PCM frames through `pico_hdmi/hdmi_audio_8ch.h`; the
+library builds and encodes the packets straight into the island queue:
+
+```c
+#include "pico_hdmi/hdmi_audio_8ch.h"
+
+audio_sample_8ch_t frames[32];     // ch[0..7]: signed 24-bit samples
+uint32_t n = hdmi_audio_8ch_free_frames();
+// ... fill up to n frames ...
+hdmi_audio_8ch_write(frames, n);   // never blocks; returns frames taken
+```
+
+`hdmi_audio_8ch_queued_frames()` reports the buffered depth,
+`hdmi_audio_8ch_underruns()` the silence inserted when the queue ran dry, and
+`hdmi_audio_8ch_frames_sent()` a counter that advances at exactly the HDMI
+audio rate (for a clock servo or a USB feedback endpoint). Encoding costs
+about 7.6 us per pair of frames at 252 MHz: the encoder, its tables and the
+queue path run from RAM. The packet-level calls
+(`hstx_packet_set_audio_sample_8ch`, `hstx_encode_data_island2`,
+`hstx_di_queue_push_8ch`) remain available.
+
+Limits: compile-time backend only (`PICO_HDMI_RUNTIME_MODES=OFF`), no
+precomposed active lines, and not in 240p mode (its line rate is too low for
+48 kHz at one island per line). The stereo push API is not available in this
+build. See `examples/audio_8ch_test`.
+
 ## Scanline Callback Timing
 
 The scanline callback runs during h-blank with very limited time:

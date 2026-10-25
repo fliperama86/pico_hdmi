@@ -86,7 +86,6 @@
 //     DI is encoded with hsync_active=false.
 #if MODE_H_SYNC_WIDTH >= (W_PREAMBLE + W_DATA_ISLAND)
 #define DI_IN_HSYNC 1
-#define SYNC_AFTER_DI (MODE_H_SYNC_WIDTH - W_PREAMBLE - W_DATA_ISLAND)
 #else
 #define DI_IN_HSYNC 0
 #endif
@@ -94,6 +93,26 @@
 // Video preamble and guard band widths (HDMI 1.3a Section 5.2.2)
 #define W_VIDEO_PREAMBLE 8
 #define W_VIDEO_GUARD_BAND 2
+
+// 8-channel audio sends two-packet audio islands (HSTX_DI_AUDIO_ISLAND_WORDS
+// = 68), which must fit wherever this mode places its islands. At most one
+// island goes out per line, so the mode also needs fewer than two samples per
+// line: 48 kHz at 480p is ~1.52, while 240p's 15.75 kHz line rate needs ~3.05.
+#if PICO_HDMI_AUDIO_8CH
+#if PICO_HDMI_PRECOMPOSED_ACTIVE_LINES
+#error "PICO_HDMI_AUDIO_8CH does not support PICO_HDMI_PRECOMPOSED_ACTIVE_LINES"
+#endif
+#if defined(VIDEO_MODE_320x240)
+#error "PICO_HDMI_AUDIO_8CH needs two samples or fewer per line; 240p's line rate is too low"
+#endif
+#if DI_IN_HSYNC && MODE_H_SYNC_WIDTH < (W_PREAMBLE + HSTX_DI_AUDIO_ISLAND_WORDS)
+#error "PICO_HDMI_AUDIO_8CH: two-packet audio island does not fit in this mode's hsync pulse"
+#endif
+#if !DI_IN_HSYNC &&                                                                                                    \
+    MODE_H_BACK_PORCH < (W_PREAMBLE + HSTX_DI_AUDIO_ISLAND_WORDS + W_VIDEO_PREAMBLE + W_VIDEO_GUARD_BAND)
+#error "PICO_HDMI_AUDIO_8CH: two-packet audio island does not fit in this mode's back porch"
+#endif
+#endif
 
 // ============================================================================
 // Audio/Video State
@@ -167,7 +186,8 @@ static uint32_t vactive_di_len, vactive_di_null_len;
 #endif
 
 #if PICO_HDMI_PRECOMPOSED_ACTIVE_LINES
-static uint32_t build_line_with_di(uint32_t *buf, const uint32_t *di_words, bool vsync, bool active);
+static uint32_t build_line_with_di(uint32_t *buf, const uint32_t *di_words, uint32_t di_len, bool vsync,
+                                   bool active);
 
 // Pre-composed active-line headers. The header content is STATIC (sync +
 // preamble + control + video preamble); only the 36 island words change per
@@ -228,12 +248,12 @@ void video_output_compose_service(void)
     // done -- this runs from the background task, after video_output init).
     const uint32_t *null_di = hstx_get_null_data_island(false, DI_HSYNC_ACTIVE);
     for (uint32_t i = 0; i < compose_ring_entries; i++) {
-        compose_ring[i].len = (uint16_t)build_line_with_di(compose_ring[i].buf, null_di, false, true);
+        compose_ring[i].len = (uint16_t)build_line_with_di(compose_ring[i].buf, null_di, W_DATA_ISLAND, false, true);
         compose_ring[i].tag = i;
     }
     // Blanking templates for the ISR's island patching (non-vsync lines).
-    precomposed_vblank_len = build_line_with_di(vblank_di_ping, null_di, false, false);
-    (void)build_line_with_di(vblank_di_pong, null_di, false, false);
+    precomposed_vblank_len = build_line_with_di(vblank_di_ping, null_di, W_DATA_ISLAND, false, false);
+    (void)build_line_with_di(vblank_di_pong, null_di, W_DATA_ISLAND, false, false);
     precomposed_null_di = null_di;
     __compiler_memory_barrier();
     compose_ring_built = true;
@@ -272,27 +292,56 @@ static void dump_static_command_lists(void)
 // HSTX Resync - Reset output to sync with input VSYNC
 // ============================================================================
 
+// NOP command words that flush any part-done HSTX command: the longest
+// command takes 4095 data words, and a NOP is harmless as either.
+#define HSTX_FLUSH_WORDS 4096
+
 static void __scratch_x("") hstx_resync(void)
 {
-    // 1. Abort DMA chains
-    dma_channel_abort(DMACH_PING);
-    dma_channel_abort(DMACH_PONG);
+    const uint32_t dma_mask = (1U << DMACH_PING) | (1U << DMACH_PONG);
 
-    // 2. Disable HSTX (resets shift register, clock generator, and flushes FIFO)
+    // 1. Stop both DMA channels. RP2350-E5: an abort can re-trigger the
+    //    channel a chain points at unless EN is cleared on the aborted channel
+    //    and on its chain target first; the two channels chain to each other.
+    //    EN comes back with the saved control words before the restart.
+    const uint32_t ctrl_ping = dma_hw->ch[DMACH_PING].al1_ctrl;
+    const uint32_t ctrl_pong = dma_hw->ch[DMACH_PONG].al1_ctrl;
+    hw_clear_bits(&dma_hw->ch[DMACH_PING].al1_ctrl, DMA_CH0_CTRL_TRIG_EN_BITS);
+    hw_clear_bits(&dma_hw->ch[DMACH_PONG].al1_ctrl, DMA_CH0_CTRL_TRIG_EN_BITS);
+    dma_hw->abort = dma_mask;
+    while ((dma_hw->ch[DMACH_PING].ctrl_trig | dma_hw->ch[DMACH_PONG].ctrl_trig) & DMA_CH0_CTRL_TRIG_BUSY_BITS)
+        tight_loop_contents();
+
+    // 2. Drain the HSTX. Disabling it does not flush the FIFO (with EN low the
+    //    FIFO is simply not popped), and the command expander may be part way
+    //    through a command whose remaining data words would swallow the start
+    //    of the restarted stream, misaligning it again. With EN still high,
+    //    feed NOPs until any such command has completed and the FIFO is empty.
+    for (int i = 0; i < HSTX_FLUSH_WORDS; i++) {
+        while (hstx_fifo_hw->stat & HSTX_FIFO_STAT_FULL_BITS)
+            tight_loop_contents();
+        hstx_fifo_hw->fifo = HSTX_CMD_NOP;
+    }
+    while (!(hstx_fifo_hw->stat & HSTX_FIFO_STAT_EMPTY_BITS))
+        tight_loop_contents();
+
+    // 3. Disable HSTX: resets the shift counter and clock generator.
     hstx_ctrl_hw->csr &= ~HSTX_CTRL_CSR_EN_BITS;
-
-    // Small delay to ensure HSTX fully stops
     __asm volatile("nop\nnop\nnop\nnop");
 
-    // 3. Reset state to start of frame
+    // Restore the channels' control words (EN included) without triggering.
+    dma_hw->ch[DMACH_PING].al1_ctrl = ctrl_ping;
+    dma_hw->ch[DMACH_PONG].al1_ctrl = ctrl_pong;
+
+    // 4. Reset state to start of frame
     v_scanline = 0;
     vactive_cmdlist_posted = false;
     dma_pong = false;
 
-    // 4. Clear any pending DMA interrupts
+    // 5. Clear any pending DMA interrupts (the abort may have raised one)
     dma_hw->ints0 = (1U << DMACH_PING) | (1U << DMACH_PONG);
 
-    // 5. Configure DMA PING to start from beginning of frame (Line 0)
+    // 6. Configure DMA PING to start from beginning of frame (Line 0)
     dma_channel_hw_t *ch_ping = &dma_hw->ch[DMACH_PING];
 #if PICO_HDMI_PRECOMPOSED_ACTIVE_LINES
     if (native_pixel_mode) {
@@ -304,13 +353,13 @@ static void __scratch_x("") hstx_resync(void)
     ch_ping->read_addr = (uintptr_t)vblank_line_vsync_off;
     ch_ping->transfer_count = count_of(vblank_line_vsync_off);
 
-    // 6. Configure DMA PONG for the NEXT line (Line 1)
+    // 7. Configure DMA PONG for the NEXT line (Line 1)
     // This ensures that when PING finishes and chains to PONG, PONG is ready.
     dma_channel_hw_t *ch_pong = &dma_hw->ch[DMACH_PONG];
     ch_pong->read_addr = (uintptr_t)vblank_line_vsync_off; // Line 1 is also blank
     ch_pong->transfer_count = count_of(vblank_line_vsync_off);
 
-    // 7. Re-enable HSTX then start DMA
+    // 8. Re-enable HSTX then start DMA
     hstx_ctrl_hw->csr |= HSTX_CTRL_CSR_EN_BITS;
     dma_channel_start(DMACH_PING);
 }
@@ -319,7 +368,10 @@ static void __scratch_x("") hstx_resync(void)
 // Internal Helpers
 // ============================================================================
 
-static uint32_t build_line_with_di(uint32_t *buf, const uint32_t *di_words, bool vsync, bool active)
+// di_len is the island's length in words: W_DATA_ISLAND for one packet,
+// HSTX_DI_AUDIO_ISLAND_WORDS for audio islands. The control period after the
+// island shrinks to match, so every line keeps MODE_H_TOTAL_PIXELS.
+static uint32_t build_line_with_di(uint32_t *buf, const uint32_t *di_words, uint32_t di_len, bool vsync, bool active)
 {
     uint32_t *p = buf;
     uint32_t sync_h0 = vsync ? SYNC_V0_H0 : SYNC_V1_H0;
@@ -337,12 +389,12 @@ static uint32_t build_line_with_di(uint32_t *buf, const uint32_t *di_words, bool
     *p++ = preamble;
     *p++ = HSTX_CMD_NOP;
 
-    *p++ = HSTX_CMD_RAW | W_DATA_ISLAND;
-    for (int i = 0; i < W_DATA_ISLAND; i++)
+    *p++ = HSTX_CMD_RAW | di_len;
+    for (uint32_t i = 0; i < di_len; i++)
         *p++ = di_words[i];
     *p++ = HSTX_CMD_NOP;
 
-    *p++ = HSTX_CMD_RAW_REPEAT | SYNC_AFTER_DI;
+    *p++ = HSTX_CMD_RAW_REPEAT | (MODE_H_SYNC_WIDTH - W_PREAMBLE - di_len);
     *p++ = sync_h0;
     *p++ = HSTX_CMD_NOP;
 
@@ -386,8 +438,8 @@ static uint32_t build_line_with_di(uint32_t *buf, const uint32_t *di_words, bool
     *p++ = HSTX_CMD_NOP;
 
     // DI packet
-    *p++ = HSTX_CMD_RAW | W_DATA_ISLAND;
-    for (int i = 0; i < W_DATA_ISLAND; i++)
+    *p++ = HSTX_CMD_RAW | di_len;
+    for (uint32_t i = 0; i < di_len; i++)
         *p++ = di_words[i];
     *p++ = HSTX_CMD_NOP;
 
@@ -396,7 +448,7 @@ static uint32_t build_line_with_di(uint32_t *buf, const uint32_t *di_words, bool
 
         // Remainder of back porch before video preamble
         *p++ = HSTX_CMD_RAW_REPEAT |
-               (MODE_H_BACK_PORCH - W_PREAMBLE - W_DATA_ISLAND - W_VIDEO_PREAMBLE - W_VIDEO_GUARD_BAND);
+               (MODE_H_BACK_PORCH - W_PREAMBLE - di_len - W_VIDEO_PREAMBLE - W_VIDEO_GUARD_BAND);
         *p++ = sync_h1;
         *p++ = HSTX_CMD_NOP;
 
@@ -410,7 +462,7 @@ static uint32_t build_line_with_di(uint32_t *buf, const uint32_t *di_words, bool
         *p++ = HSTX_CMD_TMDS | MODE_H_ACTIVE_PIXELS;
     } else {
         // Remainder of back porch + full active area as control period
-        *p++ = HSTX_CMD_RAW_REPEAT | (MODE_H_BACK_PORCH - W_PREAMBLE - W_DATA_ISLAND + MODE_H_ACTIVE_PIXELS);
+        *p++ = HSTX_CMD_RAW_REPEAT | (MODE_H_BACK_PORCH - W_PREAMBLE - di_len + MODE_H_ACTIVE_PIXELS);
         *p++ = sync_h1;
         *p++ = HSTX_CMD_NOP;
     }
@@ -520,7 +572,7 @@ static inline void __scratch_x("")
         uint32_t *buf = dma_pong ? vactive_di_ping : vactive_di_pong;
         const uint32_t *di_words = hstx_di_queue_get_audio_packet();
         if (di_words) {
-            vactive_di_len = build_line_with_di(buf, di_words, false, true);
+            vactive_di_len = build_line_with_di(buf, di_words, HSTX_DI_AUDIO_ISLAND_WORDS, false, true);
             ch->read_addr = (uintptr_t)buf;
             ch->transfer_count = vactive_di_len;
         } else {
@@ -568,10 +620,20 @@ static inline void __scratch_x("")
                 ch->transfer_count = vblank_di_null_len;
             }
 #else
+#if PICO_HDMI_AUDIO_8CH
+            // Line 1 is posted while line 0's AVI list drains into the HSTX
+            // FIFO. That list is mostly one long repeat, so its DMA finishes
+            // ~75 pixels after it starts: about 380 cycles at 126 MHz, too few
+            // to copy an 88-word two-packet audio line before the chain
+            // re-triggers this channel. Send line 1 without audio; the
+            // scheduler's backlog goes out on the following lines.
+            const uint32_t *di_words = (v_scanline == 1) ? NULL : hstx_di_queue_get_audio_packet();
+#else
             const uint32_t *di_words = hstx_di_queue_get_audio_packet();
+#endif
             if (di_words) {
                 uint32_t *buf = dma_pong ? vblank_di_ping : vblank_di_pong;
-                vblank_di_len = build_line_with_di(buf, di_words, false, false);
+                vblank_di_len = build_line_with_di(buf, di_words, HSTX_DI_AUDIO_ISLAND_WORDS, false, false);
                 ch->read_addr = (uintptr_t)buf;
                 ch->transfer_count = vblank_di_len;
             } else {
@@ -699,15 +761,21 @@ static void configure_audio_packets(uint32_t sample_rate)
     get_acr_params(sample_rate, &acr_n, &acr_cts);
     hstx_packet_set_acr(&packet, acr_n, acr_cts);
     hstx_encode_data_island(&island, &packet, true, DI_HSYNC_ACTIVE);
-    vblank_acr_vsync_on_len = build_line_with_di(vblank_acr_vsync_on, island.words, true, false);
+    vblank_acr_vsync_on_len = build_line_with_di(vblank_acr_vsync_on, island.words, W_DATA_ISLAND, true, false);
     hstx_encode_data_island(&island, &packet, false, DI_HSYNC_ACTIVE);
-    vblank_acr_vsync_off_len = build_line_with_di(vblank_acr_vsync_off, island.words, false, false);
+    vblank_acr_vsync_off_len = build_line_with_di(vblank_acr_vsync_off, island.words, W_DATA_ISLAND, false, false);
 
+#if PICO_HDMI_AUDIO_8CH
+    hstx_packet_set_audio_infoframe_ca(&packet, sample_rate, 8, 24, HSTX_AUDIO_CA_7_1);
+#else
     hstx_packet_set_audio_infoframe(&packet, sample_rate, 2, 16);
+#endif
     hstx_encode_data_island(&island, &packet, true, DI_HSYNC_ACTIVE);
-    vblank_infoframe_vsync_on_len = build_line_with_di(vblank_infoframe_vsync_on, island.words, true, false);
+    vblank_infoframe_vsync_on_len =
+        build_line_with_di(vblank_infoframe_vsync_on, island.words, W_DATA_ISLAND, true, false);
     hstx_encode_data_island(&island, &packet, false, DI_HSYNC_ACTIVE);
-    vblank_infoframe_vsync_off_len = build_line_with_di(vblank_infoframe_vsync_off, island.words, false, false);
+    vblank_infoframe_vsync_off_len =
+        build_line_with_di(vblank_infoframe_vsync_off, island.words, W_DATA_ISLAND, false, false);
 }
 
 void video_output_init(uint16_t width, uint16_t height)
@@ -751,14 +819,15 @@ void video_output_init(uint16_t width, uint16_t height)
 #endif
     hstx_packet_set_avi_infoframe_aspect(&packet, vic, pixel_repetition, MODE_AVI_ASPECT_16_9 != 0);
     hstx_encode_data_island(&island, &packet, false, DI_HSYNC_ACTIVE);
-    vblank_avi_infoframe_len = build_line_with_di(vblank_avi_infoframe, island.words, false, false);
+    vblank_avi_infoframe_len = build_line_with_di(vblank_avi_infoframe, island.words, W_DATA_ISLAND, false, false);
 
-    vblank_di_null_len =
-        build_line_with_di(vblank_di_null, hstx_get_null_data_island(false, DI_HSYNC_ACTIVE), false, false);
-    vactive_di_null_len =
-        build_line_with_di(vactive_di_null, hstx_get_null_data_island(false, DI_HSYNC_ACTIVE), false, true);
+    vblank_di_null_len = build_line_with_di(vblank_di_null, hstx_get_null_data_island(false, DI_HSYNC_ACTIVE),
+                                            W_DATA_ISLAND, false, false);
+    vactive_di_null_len = build_line_with_di(vactive_di_null, hstx_get_null_data_island(false, DI_HSYNC_ACTIVE),
+                                             W_DATA_ISLAND, false, true);
 
-    vblank_di_len = build_line_with_di(vblank_di_ping, hstx_get_null_data_island(false, DI_HSYNC_ACTIVE), false, false);
+    vblank_di_len = build_line_with_di(vblank_di_ping, hstx_get_null_data_island(false, DI_HSYNC_ACTIVE), W_DATA_ISLAND,
+                                       false, false);
     memcpy(vblank_di_pong, vblank_di_ping, sizeof(vblank_di_ping));
 }
 
@@ -790,6 +859,21 @@ void video_output_set_scanline_pointer_callback(video_output_scanline_ptr_cb_t c
 void video_output_set_vsync_callback(video_output_vsync_cb_t cb)
 {
     vsync_callback = cb;
+}
+
+// Core 1's idle loop runs from RAM. Core 1 cannot take the scanline
+// interrupt until its current instruction fetch completes, and a fetch that
+// misses the XIP cache waits on the QSPI bus, which Core 0's own flash
+// fetches also use: added interrupt latency that eats into the scanline
+// deadline. The background task, if any, should be in RAM too.
+static void __no_inline_not_in_flash_func(core1_idle_loop)(void)
+{
+    while (1) {
+        if (background_task) {
+            background_task();
+        }
+        tight_loop_contents();
+    }
 }
 
 void video_output_core1_run(void)
@@ -844,12 +928,7 @@ void video_output_core1_run(void)
     bus_ctrl_hw->priority = BUSCTRL_BUS_PRIORITY_DMA_W_BITS | BUSCTRL_BUS_PRIORITY_DMA_R_BITS;
     dma_channel_start(DMACH_PING);
 
-    while (1) {
-        if (background_task) {
-            background_task();
-        }
-        tight_loop_contents();
-    }
+    core1_idle_loop();
 }
 
 void pico_hdmi_set_audio_sample_rate(uint32_t sample_rate)

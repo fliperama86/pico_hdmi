@@ -4,6 +4,8 @@
 
 #include <string.h>
 
+#include "pico.h"
+
 #ifndef PICO_HDMI_RT_RUNTIME_MODE_ATTRS
 #define PICO_HDMI_RT_RUNTIME_MODE_ATTRS 0
 #endif
@@ -31,7 +33,13 @@
 // TERC4 Symbol Table (4-bit to 10-bit encoding)
 // ============================================================================
 
-static const uint16_t ter_c4[16] = {
+// The TERC4, BCH and parity tables are placed in RAM (a .time_critical
+// section) so the audio packet path, also in RAM, never waits on a flash cache
+// miss. Dropping const is not enough: the compiler moves never-written tables
+// back to flash.
+#define PICO_HDMI_RAM_TABLE __not_in_flash("pico_hdmi_tables")
+
+static const uint16_t PICO_HDMI_RAM_TABLE ter_c4[16] = {
     0b1010011100, // 0
     0b1001100011, // 1
     0b1011100100, // 2
@@ -67,7 +75,7 @@ static bool packet_vsync_positive = HSTX_PACKET_DEFAULT_VSYNC_POSITIVE;
 // BCH Encoding
 // ============================================================================
 
-static const uint8_t bch_table[256] = {
+static const uint8_t PICO_HDMI_RAM_TABLE bch_table[256] = {
     0x00, 0xd9, 0xb5, 0x6c, 0x6d, 0xb4, 0xd8, 0x01, 0xda, 0x03, 0x6f, 0xb6, 0xb7, 0x6e, 0x02, 0xdb, 0xb3, 0x6a, 0x06,
     0xdf, 0xde, 0x07, 0x6b, 0xb2, 0x69, 0xb0, 0xdc, 0x05, 0x04, 0xdd, 0xb1, 0x68, 0x61, 0xb8, 0xd4, 0x0d, 0x0c, 0xd5,
     0xb9, 0x60, 0xbb, 0x62, 0x0e, 0xd7, 0xd6, 0x0f, 0x63, 0xba, 0xd2, 0x0b, 0x67, 0xbe, 0xbf, 0x66, 0x0a, 0xd3, 0x08,
@@ -84,7 +92,7 @@ static const uint8_t bch_table[256] = {
     0x92, 0x49, 0x90, 0xfc, 0x25, 0x24, 0xfd, 0x91, 0x48,
 };
 
-static const uint8_t parity_table[32] = {0x96, 0x69, 0x69, 0x96, 0x69, 0x96, 0x96, 0x69, 0x69, 0x96, 0x96,
+static const uint8_t PICO_HDMI_RAM_TABLE parity_table[32] = {0x96, 0x69, 0x69, 0x96, 0x69, 0x96, 0x96, 0x69, 0x69, 0x96, 0x96,
                                          0x69, 0x96, 0x69, 0x69, 0x96, 0x69, 0x96, 0x96, 0x69, 0x96, 0x69,
                                          0x69, 0x96, 0x96, 0x69, 0x69, 0x96, 0x69, 0x96, 0x96, 0x69};
 
@@ -98,7 +106,7 @@ static inline bool compute_parity3(uint8_t a, uint8_t b, uint8_t c)
     return compute_parity(a) ^ compute_parity(b) ^ compute_parity(c);
 }
 
-static uint8_t encode_bch_3(const uint8_t *p)
+static uint8_t __not_in_flash_func(encode_bch_3)(const uint8_t *p)
 {
     uint8_t v = bch_table[p[0]];
     v = bch_table[p[1] ^ v];
@@ -106,7 +114,7 @@ static uint8_t encode_bch_3(const uint8_t *p)
     return v;
 }
 
-static uint8_t encode_bch_7(const uint8_t *p)
+static uint8_t __not_in_flash_func(encode_bch_7)(const uint8_t *p)
 {
     uint8_t v = bch_table[p[0]];
     v = bch_table[p[1] ^ v];
@@ -118,12 +126,12 @@ static uint8_t encode_bch_7(const uint8_t *p)
     return v;
 }
 
-static void compute_header_parity(hstx_packet_t *p)
+static void __not_in_flash_func(compute_header_parity)(hstx_packet_t *p)
 {
     p->header[3] = encode_bch_3(p->header);
 }
 
-static void compute_subpacket_parity(hstx_packet_t *p, int idx)
+static void __not_in_flash_func(compute_subpacket_parity)(hstx_packet_t *p, int idx)
 {
     p->subpacket[idx][7] = encode_bch_7(p->subpacket[idx]);
 }
@@ -237,6 +245,12 @@ void hstx_packet_set_acr(hstx_packet_t *packet, uint32_t n, uint32_t cts)
 void hstx_packet_set_audio_infoframe(hstx_packet_t *packet, uint32_t sample_rate, uint8_t channels,
                                      uint8_t bits_per_sample)
 {
+    hstx_packet_set_audio_infoframe_ca(packet, sample_rate, channels, bits_per_sample, HSTX_AUDIO_CA_STEREO);
+}
+
+void hstx_packet_set_audio_infoframe_ca(hstx_packet_t *packet, uint32_t sample_rate, uint8_t channels,
+                                        uint8_t bits_per_sample, uint8_t channel_allocation)
+{
     hstx_packet_init(packet);
     packet->header[0] = 0x84;
     packet->header[1] = 0x01;
@@ -251,7 +265,7 @@ void hstx_packet_set_audio_infoframe(hstx_packet_t *packet, uint32_t sample_rate
     packet->subpacket[0][1] = cc | (ct << 4);
     packet->subpacket[0][2] = ss | (sf << 2);
     packet->subpacket[0][3] = 0x00;
-    packet->subpacket[0][4] = 0x00;
+    packet->subpacket[0][4] = channel_allocation;
     packet->subpacket[0][5] = 0x00;
 
     compute_infoframe_checksum(packet);
@@ -381,7 +395,12 @@ static uint8_t channel_status_sample_frequency(uint32_t sample_rate)
     }
 }
 
-static inline int channel_status_bit(int frame, uint32_t sample_rate)
+// Byte 4 word-length codes: 0x00 = not indicated, 0x0B = 24 bits (maximum
+// 24 bits, word length 24).
+#define CHANNEL_STATUS_WORD_LENGTH_NONE 0x00
+#define CHANNEL_STATUS_WORD_LENGTH_24 0x0B
+
+static inline int channel_status_bit_wl(int frame, uint32_t sample_rate, uint8_t word_length)
 {
     if (frame >= 40)
         return 0;
@@ -391,7 +410,14 @@ static inline int channel_status_bit(int frame, uint32_t sample_rate)
         value = 0x04;
     else if (frame >= 24 && frame < 32)
         value = channel_status_sample_frequency(sample_rate);
+    else if (frame >= 32)
+        value = word_length;
     return (value >> (frame & 7)) & 1;
+}
+
+static inline int channel_status_bit(int frame, uint32_t sample_rate)
+{
+    return channel_status_bit_wl(frame, sample_rate, CHANNEL_STATUS_WORD_LENGTH_NONE);
 }
 
 int hstx_packet_set_audio_samples_cs_rate(hstx_packet_t *packet, const audio_sample_t *samples, int num_samples,
@@ -443,6 +469,45 @@ int hstx_packet_set_audio_samples_cs_rate(hstx_packet_t *packet, const audio_sam
     }
 
     return temp_frame_count;
+}
+
+int __not_in_flash_func(hstx_packet_set_audio_sample_8ch)(hstx_packet_t *packet, const audio_sample_8ch_t *sample,
+                                                          int frame_count, uint32_t sample_rate)
+{
+    // Every header and subpacket byte is written below, so no memset (which
+    // would also run from flash).
+
+    // Layout 1 carries one frame per packet, so every subpacket holds the
+    // same IEC 60958 frame: all four B flags mark the block start together.
+    packet->header[0] = 0x02;
+    packet->header[1] = 0x10 | 0x0F; // layout=1, sample_present.sp0..sp3
+    packet->header[2] = (frame_count == 0) ? 0xF0 : 0x00;
+    compute_header_parity(packet);
+
+    int c = channel_status_bit_wl(frame_count, sample_rate, CHANNEL_STATUS_WORD_LENGTH_24);
+
+    for (int i = 0; i < 4; i++) {
+        uint8_t *d = packet->subpacket[i];
+        int32_t a = sample->ch[2 * i];
+        int32_t b = sample->ch[(2 * i) + 1];
+
+        d[0] = a & 0xFF;
+        d[1] = (a >> 8) & 0xFF;
+        d[2] = (a >> 16) & 0xFF;
+        d[3] = b & 0xFF;
+        d[4] = (b >> 8) & 0xFF;
+        d[5] = (b >> 16) & 0xFF;
+
+        // Parity covers the 24-bit sample plus V, U, C (V=U=0 here).
+        int p_a = (int)compute_parity3(d[0], d[1], d[2]) ^ c;
+        int p_b = (int)compute_parity3(d[3], d[4], d[5]) ^ c;
+
+        // Byte 6: VL UL CL PL VR UR CR PR (bits 0..7).
+        d[6] = (uint8_t)((c << 2) | (p_a << 3) | (c << 6) | (p_b << 7));
+        compute_subpacket_parity(packet, i);
+    }
+
+    return (frame_count + 1) % 192;
 }
 
 int hstx_packet_set_audio_samples_cs(hstx_packet_t *packet, const audio_sample_t *samples, int num_samples,
@@ -506,73 +571,100 @@ static inline uint32_t make_hstx_word(uint16_t lane0, uint16_t lane1, uint16_t l
     return (lane0 & 0x3FF) | ((lane1 & 0x3FF) << 10) | ((lane2 & 0x3FF) << 20);
 }
 
-static void encode_header_to_lane0(const hstx_packet_t *packet, uint16_t *lane0, int hv, bool first_packet)
-{
-    int hv1 = hv | 0x08;
-    if (!first_packet)
-        hv = hv1;
+// Both data-lane TERC4 symbols for one pixel, already in their HSTX word
+// positions: index = lane 1 nibble | lane 2 nibble << 4. Built on first use.
+// In RAM, like the encoder that reads it, so audio encoding never waits on a
+// flash cache miss.
+static uint32_t terc4_lanes12[256];
+static bool terc4_lanes12_ready;
 
-    int idx = 0;
-    for (int i = 0; i < 4; i++) {
-        uint8_t h = packet->header[i];
-        lane0[idx++] = ter_c4[((h << 2) & 4) | hv];
-        hv = hv1;
-        lane0[idx++] = ter_c4[((h << 1) & 4) | hv];
-        lane0[idx++] = ter_c4[(h & 4) | hv];
-        lane0[idx++] = ter_c4[((h >> 1) & 4) | hv];
-        lane0[idx++] = ter_c4[((h >> 2) & 4) | hv];
-        lane0[idx++] = ter_c4[((h >> 3) & 4) | hv];
-        lane0[idx++] = ter_c4[((h >> 4) & 4) | hv];
-        lane0[idx++] = ter_c4[((h >> 5) & 4) | hv];
+static void init_terc4_lanes12(void)
+{
+    for (int i = 0; i < 256; i++) {
+        terc4_lanes12[i] = ((uint32_t)ter_c4[i & 0xF] << 10) | ((uint32_t)ter_c4[i >> 4] << 20);
     }
+    terc4_lanes12_ready = true;
 }
 
-static void encode_subpackets_to_lanes(const hstx_packet_t *packet, uint16_t *lane1, uint16_t *lane2)
+// vsync_active/hsync_active indicate pulse region, not wire level.
+// The hv field encodes the actual wire bits (bit1=vsync, bit0=hsync), so
+// pulse-region semantics are inverted for negative-polarity modes.
+static int __not_in_flash_func(data_island_hv)(bool vsync_active, bool hsync_active)
 {
+    const bool vsync_positive = hstx_packet_get_vsync_positive();
+    const bool hsync_positive = hstx_packet_get_hsync_positive();
+    return (vsync_active == vsync_positive ? 2 : 0) | (hsync_active == hsync_positive ? 1 : 0);
+}
+
+static inline uint32_t data_island_guard_word(int hv)
+{
+    return make_hstx_word(ter_c4[0xC | hv], GUARD_BAND_SYMBOL, GUARD_BAND_SYMBOL);
+}
+
+// Write one packet's 32 words (no guard bands) starting at out.
+//
+// Lane 0 carries the header, one bit per pixel in TERC4 bit 2, with the sync
+// levels in bits 0-1 and bit 3 clear only on the island's first pixel. Lanes 1
+// and 2 carry the four subpackets: pixel k takes bit 2k (lane 1) and bit 2k+1
+// (lane 2) of each subpacket, subpacket n in nibble bit n.
+static void __not_in_flash_func(encode_packet_words)(uint32_t *out, const hstx_packet_t *packet, int hv,
+                                                       bool first_packet)
+{
+    if (!terc4_lanes12_ready) {
+        init_terc4_lanes12();
+    }
+    const uint32_t lane0_sym[2] = {ter_c4[0x8 | hv], ter_c4[0xC | hv]};
+    const uint32_t header = (uint32_t)packet->header[0] | ((uint32_t)packet->header[1] << 8) |
+                            ((uint32_t)packet->header[2] << 16) | ((uint32_t)packet->header[3] << 24);
+
     for (int i = 0; i < 8; i++) {
+        // Byte i of each subpacket covers pixels 4i..4i+3. Transpose so each
+        // pixel's lane 1 and lane 2 nibbles sit in one byte of lo or hi.
         uint32_t v = (packet->subpacket[0][i] << 0) | (packet->subpacket[1][i] << 8) | (packet->subpacket[2][i] << 16) |
                      (packet->subpacket[3][i] << 24);
         uint32_t t = (v ^ (v >> 7)) & 0x00aa00aa;
         v = v ^ t ^ (t << 7);
         t = (v ^ (v >> 14)) & 0x0000cccc;
         v = v ^ t ^ (t << 14);
-
-        lane1[(i * 4) + 0] = ter_c4[(v >> 0) & 0xF];
-        lane1[(i * 4) + 1] = ter_c4[(v >> 16) & 0xF];
-        lane1[(i * 4) + 2] = ter_c4[(v >> 4) & 0xF];
-        lane1[(i * 4) + 3] = ter_c4[(v >> 20) & 0xF];
-
-        lane2[(i * 4) + 0] = ter_c4[(v >> 8) & 0xF];
-        lane2[(i * 4) + 1] = ter_c4[(v >> 24) & 0xF];
-        lane2[(i * 4) + 2] = ter_c4[(v >> 12) & 0xF];
-        lane2[(i * 4) + 3] = ter_c4[(v >> 28) & 0xF];
+        const uint32_t lo = v & 0x0F0F0F0F;        // pixels 4i, 4i+1
+        const uint32_t hi = (v >> 4) & 0x0F0F0F0F; // pixels 4i+2, 4i+3
+        const uint32_t h = header >> (4 * i);
+        uint32_t *o = &out[4 * i];
+        o[0] = lane0_sym[h & 1] | terc4_lanes12[(lo | (lo >> 4)) & 0xFF];
+        o[1] = lane0_sym[(h >> 1) & 1] | terc4_lanes12[((lo >> 16) | (lo >> 20)) & 0xFF];
+        o[2] = lane0_sym[(h >> 2) & 1] | terc4_lanes12[(hi | (hi >> 4)) & 0xFF];
+        o[3] = lane0_sym[(h >> 3) & 1] | terc4_lanes12[((hi >> 16) | (hi >> 20)) & 0xFF];
+    }
+    if (first_packet) {
+        out[0] = (out[0] & ~0x3FFu) | ter_c4[((header & 1) << 2) | hv];
     }
 }
 
-void hstx_encode_data_island(hstx_data_island_t *out, const hstx_packet_t *packet, bool vsync_active, bool hsync_active)
+void __not_in_flash_func(hstx_encode_data_island)(hstx_data_island_t *out, const hstx_packet_t *packet,
+                                                   bool vsync_active, bool hsync_active)
 {
-    // vsync_active/hsync_active indicate pulse region, not wire level.
-    // The hv field encodes the actual wire bits (bit1=vsync, bit0=hsync), so
-    // pulse-region semantics are inverted for negative-polarity modes.
-    const bool vsync_positive = hstx_packet_get_vsync_positive();
-    const bool hsync_positive = hstx_packet_get_hsync_positive();
-    int hv = (vsync_active == vsync_positive ? 2 : 0) | (hsync_active == hsync_positive ? 1 : 0);
-    uint16_t lane0[32];
-    uint16_t lane1[32];
-    uint16_t lane2[32];
-
-    encode_header_to_lane0(packet, lane0, hv, true);
-    encode_subpackets_to_lanes(packet, lane1, lane2);
-
-    uint16_t gb_lane0 = ter_c4[0xC | hv];
-    uint32_t guard_word = make_hstx_word(gb_lane0, GUARD_BAND_SYMBOL, GUARD_BAND_SYMBOL);
+    int hv = data_island_hv(vsync_active, hsync_active);
+    uint32_t guard_word = data_island_guard_word(hv);
 
     out->words[0] = guard_word;
     out->words[1] = guard_word;
-    for (int i = 0; i < 32; i++)
-        out->words[i + 2] = make_hstx_word(lane0[i], lane1[i], lane2[i]);
+    encode_packet_words(&out->words[2], packet, hv, true);
     out->words[34] = guard_word;
     out->words[35] = guard_word;
+}
+
+void __not_in_flash_func(hstx_encode_data_island2)(hstx_data_island2_t *out, const hstx_packet_t *first,
+                                                    const hstx_packet_t *second, bool vsync_active, bool hsync_active)
+{
+    int hv = data_island_hv(vsync_active, hsync_active);
+    uint32_t guard_word = data_island_guard_word(hv);
+
+    out->words[0] = guard_word;
+    out->words[1] = guard_word;
+    encode_packet_words(&out->words[2], first, hv, true);
+    encode_packet_words(&out->words[2 + W_DATA_PACKET], second, hv, false);
+    out->words[W_DATA_ISLAND_2 - 2] = guard_word;
+    out->words[W_DATA_ISLAND_2 - 1] = guard_word;
 }
 
 static void init_null_islands(void)

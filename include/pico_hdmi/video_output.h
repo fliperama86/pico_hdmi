@@ -210,6 +210,9 @@ void video_output_set_vsync_callback(video_output_vsync_cb_t cb);
 /**
  * Register a background task to run in the Core 1 loop.
  * This is typically used for audio processing.
+ * Place it in RAM (__not_in_flash_func): Core 1 spins on it between scanline
+ * interrupts, and executing from flash there can delay the interrupt by a
+ * flash cache miss.
  */
 void video_output_set_background_task(video_output_task_fn task);
 
