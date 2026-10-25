@@ -38,9 +38,14 @@ static uint32_t audio_pacing_den = 1;
 static uint32_t audio_pacing_rem_accum = 0;
 #endif
 
-// Limit accumulator to avoid overflow if we run dry.
-// Clamping to 1 packet (plus a tiny margin is implicit) ensures we don't burst.
-#define MAX_AUDIO_ACCUM (4 << 16)
+// Cap on the audio backlog (samples due but not yet sent), in 16.16. Lines
+// that carry no audio island (vsync, ACR, InfoFrames) leave a few islands of
+// backlog each frame, which later lines pay back; 16 islands is far above
+// that. Without the cap the accumulator keeps growing whenever lines tick
+// without taking audio (for example precomposed lines before the compose
+// ring is built), then puts an island on every line until the backlog is
+// paid off; at 480p it wraps after about 1.4 s.
+#define MAX_AUDIO_ACCUM (16 * (4 << 16))
 
 static void hstx_di_queue_build_silence_packet(void)
 {
@@ -139,6 +144,8 @@ uint32_t hstx_di_queue_get_level(void)
 void __scratch_x("") hstx_di_queue_tick(void)
 {
     audio_sample_accum += samples_per_line_fp;
+    if (audio_sample_accum > MAX_AUDIO_ACCUM)
+        audio_sample_accum = MAX_AUDIO_ACCUM;
 #if PICO_HDMI_EXACT_AUDIO_PACING
     audio_pacing_rem_accum += audio_pacing_rem;
     if (audio_pacing_rem_accum >= audio_pacing_den) {
